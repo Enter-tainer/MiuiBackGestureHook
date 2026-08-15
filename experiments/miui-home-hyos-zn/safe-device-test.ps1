@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Serial,
     [string]$PackageZip,
-    [switch]$Confirm4371
+    [switch]$Confirm4371,
+    [switch]$Confirm5334
 )
 
 Set-StrictMode -Version Latest
@@ -18,6 +19,8 @@ $Hsctl = "$ModuleDir/bin/hsctl"
 $Znctl = '/data/adb/modules/zygisksu/bin/zygiskd'
 $ExpectedVersionCode = '801024371'
 $ExpectedVersionName = 'RELEASE-8.01.02.4371-260727-08131546-R'
+$ExpectedVersionCode5334 = '801025334'
+$ExpectedVersionName5334 = 'RELEASE-8.01.02.5334-260807-08151151-R'
 $ExpectedNativeSha256 =
     '10388972d3fed052285710d7b3de8b895f3f6bac71f711fee9dab32530599d78'
 $EvidenceRoot = Join-Path $PSScriptRoot 'out\device-tests'
@@ -42,7 +45,11 @@ function Invoke-Root {
     $doubleQuote = [char]34
     $quoteEscape = -join @(
         $singleQuote, $doubleQuote, $singleQuote, $doubleQuote, $singleQuote)
-    $escaped = $Command.Replace($singleQuote.ToString(), $quoteEscape)
+    # PowerShell here-strings use CRLF on Windows. Android mksh treats the
+    # retained carriage return as a command name after a semicolon, so every
+    # root script must be normalized before it is quoted for `su -c`.
+    $normalized = $Command.Replace("`r`n", "`n").Trim()
+    $escaped = $normalized.Replace($singleQuote.ToString(), $quoteEscape)
     $remote = [string]::Concat('su -c ', $singleQuote, $escaped, $singleQuote)
     Invoke-Adb -Arguments @('shell', $remote) -AllowFailure:$AllowFailure
 }
@@ -68,13 +75,32 @@ function Assert-Device {
     }
 }
 
+function Get-ConfirmedProfile {
+    if ($Confirm4371 -eq $Confirm5334) {
+        throw 'Mutation requires exactly one of -Confirm4371 or -Confirm5334.'
+    }
+    if ($Confirm4371) {
+        return [pscustomobject]@{
+            Id = '4371'
+            VersionCode = $ExpectedVersionCode
+            VersionName = $ExpectedVersionName
+        }
+    }
+    [pscustomobject]@{
+        Id = '5334'
+        VersionCode = $ExpectedVersionCode5334
+        VersionName = $ExpectedVersionName5334
+    }
+}
+
 function Assert-ExactMiuiHome {
+    param([pscustomobject]$Profile)
     $package = (Invoke-Adb -Arguments @(
         'shell', 'dumpsys', 'package', 'com.miui.home')).Text
-    $namePattern = [regex]::Escape($ExpectedVersionName)
-    if ($package -notmatch "versionCode=$ExpectedVersionCode(?:\s|$)" -or
+    $namePattern = [regex]::Escape($Profile.VersionName)
+    if ($package -notmatch "versionCode=$($Profile.VersionCode)(?:\s|$)" -or
             $package -notmatch "versionName=$namePattern(?:\s|$)") {
-        throw 'Refusing mutation: installed MiuiHome is not exact approved 4371.'
+        throw "Refusing mutation: installed MiuiHome is not exact approved $($Profile.Id)."
     }
 }
 
@@ -379,17 +405,17 @@ switch ($Action) {
         "evidence=$(Write-Evidence -Phase 'gesture')"
     }
     'Rollback' {
-        if (-not $Confirm4371) { throw 'Rollback requires -Confirm4371.' }
-        Assert-ExactMiuiHome
+        $profile = Get-ConfirmedProfile
+        Assert-ExactMiuiHome -Profile $profile
         (Invoke-Hsctl -Command 'rollback --confirm').Text
-        "evidence=$(Write-Evidence -Phase 'rollback')"
+        "evidence=$(Write-Evidence -Phase "rollback-$($profile.Id)")"
     }
     'Deploy' {
-        if (-not $Confirm4371) { throw 'Deploy requires -Confirm4371.' }
+        $profile = Get-ConfirmedProfile
         if ([string]::IsNullOrWhiteSpace($PackageZip)) {
             throw 'Deploy requires -PackageZip.'
         }
-        Assert-ExactMiuiHome
+        Assert-ExactMiuiHome -Profile $profile
         $zip = (Resolve-Path -LiteralPath $PackageZip).Path
         $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
         $shortHash = $zipHash.Substring(0, 12)
@@ -417,7 +443,8 @@ switch ($Action) {
                 Invoke-Hsctl -Command 'rollback --confirm' -AllowFailure | Out-Null
                 throw "New tombstone detected; rolled back: $after"
             }
-            "evidence=$(Write-Evidence -Phase 'activated-before-gesture')"
+            "profile=$($profile.Id)"
+            "evidence=$(Write-Evidence -Phase "activated-$($profile.Id)-before-gesture")"
             'next_step=perform exactly one fresh side-back gesture, then run Capture'
         }
         catch {

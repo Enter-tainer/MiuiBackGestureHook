@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 
 project(miui_home_hyos_zn LANGUAGES CXX ASM)
 
+if(NOT DEFINED LAUNCHER_PROFILE_INCLUDE_DIR OR
+   NOT EXISTS "${LAUNCHER_PROFILE_INCLUDE_DIR}/launcher_profiles.generated.h")
+    message(FATAL_ERROR
+        "Generate launcher profiles through build.ps1 before configuring CMake")
+endif()
+
 if(NOT ANDROID)
     message(FATAL_ERROR "miui_home_hyos_zn must use the Android NDK toolchain")
 endif()
@@ -14,6 +20,11 @@ add_library(miui_home_hyos_zn SHARED
     zn_module.cpp
     broadcast_options_tail_hook.S
     input_monitor_pilfer_hook.S
+)
+
+target_include_directories(miui_home_hyos_zn PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LAUNCHER_PROFILE_INCLUDE_DIR}
 )
 
 target_compile_features(miui_home_hyos_zn PRIVATE cxx_std_17)

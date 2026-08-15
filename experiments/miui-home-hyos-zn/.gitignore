@@ -4,6 +4,7 @@ out/
 build/
 *.so
 *.zip
+__pycache__/
 diagnostics.map
 module.prop
 

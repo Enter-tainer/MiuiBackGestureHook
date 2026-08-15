@@ -8,6 +8,12 @@ $Paths = @{
     Cli = Join-Path $PSScriptRoot 'bin\hsctl'
     Deploy = Join-Path $PSScriptRoot 'safe-device-test.ps1'
     Native = Join-Path $PSScriptRoot 'zn_module.cpp'
+    Profiles = Join-Path $PSScriptRoot 'launcher-profiles.json'
+    ProfileGenerator = Join-Path $PSScriptRoot 'generate-launcher-profiles.py'
+    ProfileHeader = Join-Path $PSScriptRoot 'launcher_profiles.h'
+    ProfileVerifier = Join-Path $PSScriptRoot 'verify-launcher-profiles.py'
+    Build = Join-Path $PSScriptRoot 'build.ps1'
+    AppBuild = Join-Path $PSScriptRoot '..\..\app\build.gradle'
     Readme = Join-Path $PSScriptRoot 'README.md'
     Customize = Join-Path $PSScriptRoot 'customize.sh.in'
     Uninstall = Join-Path $PSScriptRoot 'uninstall.sh'
@@ -47,6 +53,9 @@ foreach ($Needle in $RequiredCli) {
 $RequiredDeploy = @(
     "[ValidateSet('Status', 'Deploy', 'Rollback', 'Capture')]",
     "ExpectedVersionCode = '801024371'",
+    "ExpectedVersionCode5334 = '801025334'",
+    '[switch]$Confirm5334',
+    'exactly one of -Confirm4371 or -Confirm5334',
     'Get-FileHash -Algorithm SHA256',
     '.next-$ShortHash',
     'Get-ModuleMappedPids',
@@ -57,11 +66,12 @@ $RequiredDeploy = @(
     "Invoke-Hsctl -Command 'activate --confirm'",
     "Invoke-Hsctl -Command 'rollback --confirm'",
     'Get-LatestTombstone',
+    '$Command.Replace("`r`n", "`n").Trim()',
     'native-counters.txt',
     'crash-logcat.txt',
     'process-events.txt',
     'diagnostics.map',
-    "Write-Evidence -Phase 'activated-before-gesture'"
+    'Write-Evidence -Phase "activated-$($profile.Id)-before-gesture"'
 )
 foreach ($Needle in $RequiredDeploy) {
     if (-not $Text.Deploy.Contains($Needle)) {
@@ -98,10 +108,10 @@ if (-not $Text.Native.Contains('bool IsExplicitlyEnabled()') -or
         -not $Text.Native.Contains('bool IsArbiterBridgeEnabled()')) {
     throw 'Native ZN-state gate contract is missing.'
 }
-$minimalStart = $Text.Native.IndexOf('bool InstallClaimedBusinessHooks4371(')
+$minimalStart = $Text.Native.IndexOf('bool InstallClaimedBusinessHooksForProfile(')
 $minimalEnd = $Text.Native.IndexOf('void ObserveLauncherHandle(', $minimalStart)
 if ($minimalStart -lt 0 -or $minimalEnd -le $minimalStart) {
-    throw 'Cannot isolate the 4371 business hook installer.'
+    throw 'Cannot isolate the profile-driven business hook installer.'
 }
 $minimalInstaller = $Text.Native.Substring($minimalStart, $minimalEnd - $minimalStart)
 foreach ($Needle in @(
@@ -121,9 +131,10 @@ foreach ($Needle in @(
         'void RepairBusinessHooksIfRemapped(',
         'outer_original != inner_original',
         'outer_original != stub_back_handler_original',
-        'kGestureStubPointerHandlerPrologue4371',
-        'kGestureBackTouchProcessorPrologue4371',
-        'kGestureStubBackHandlerPrologue4371',
+        'profile->pointer_handler_prologue',
+        'profile->touch_processor_prologue',
+        'profile->side_handler_prologue',
+        'BusinessHookTopology::kLegacyThreeStage',
         'g_api.inlineUnhook(',
         'g_business_repair_success_count')) {
     if (-not $minimalInstaller.Contains($Needle)) {
@@ -131,13 +142,73 @@ foreach ($Needle in @(
     }
 }
 foreach ($Needle in @(
-        'kGestureStubBackHandlerOffset4371',
+        'profile->side_handler_offset',
+        'profile->side_edge_field_offset',
         'g_pending_down.edge != stub_edge',
         'CurrentEventMatchesOwnedStream(event)',
         'published GestureStubView accepted Back DOWN',
         'preventing only GestureInputBackHelper::on_touch_event')) {
     if (-not $Text.Native.Contains($Needle)) {
         throw "GestureStubView Back-only handoff contract is missing: $Needle"
+    }
+}
+if ($Text.AppBuild -notmatch 'versionName\s+"0\.9\.1"' -or
+        -not $Text.Build.Contains("Join-Path `$RepoRoot 'app\build.gradle'") -or
+        -not $Text.Build.Contains('git -C $RepoRoot rev-list --count HEAD') -or
+        -not $Text.Build.Contains("generate-launcher-profiles.py") -or
+        $Text.Build.Contains("generate-launcher-profiles.ps1") -or
+        $Text.Build -match "(?m)^\s*`$Version\s*=\s*'\d") {
+    throw 'App and ZN package versions no longer share the canonical BuildConfig sources.'
+}
+foreach ($Needle in @(
+        'library_sha256',
+        'rva_to_file_offset(',
+        'require_executable=True',
+        'identity_fingerprints',
+        'side_handler')) {
+    if (-not $Text.ProfileVerifier.Contains($Needle)) {
+        throw "Offline launcher profile verifier is missing: $Needle"
+    }
+}
+if (-not $Text.Native.Contains('ResolveLauncherProfile(') -or
+        -not $Text.Native.Contains('MatchesLauncherProfile(') -or
+        -not $Text.Native.Contains('InstallLauncherInputHooksForProfile(')) {
+    throw 'Launcher hooks are not selected through the fail-closed profile registry.'
+}
+
+$Manifest = $Text.Profiles | ConvertFrom-Json
+if ($Manifest.schema_version -ne 1) {
+    throw 'Unexpected launcher profile schema version.'
+}
+$Profiles = @($Manifest.profiles)
+$ProfileIds = (@($Profiles | ForEach-Object { $_.id } | Sort-Object) -join ',')
+if ($Profiles.Count -ne 2 -or $ProfileIds -ne '4371,5334') {
+    throw 'The launcher profile manifest must contain exactly 4371 and 5334.'
+}
+$Profile4371 = @($Profiles | Where-Object { $_.id -eq '4371' })[0]
+$Profile5334 = @($Profiles | Where-Object { $_.id -eq '5334' })[0]
+if ($Profile4371.hook_topology -ne 'legacy_three_stage' -or
+        $Profile4371.entry_offset -ne '0x885d00' -or
+        $Profile4371.side_handler.offset -ne '0xc6e954' -or
+        $Profile4371.side_handler.edge_field_offset -ne '0xec' -or
+        $Profile4371.abi.runtime_ready_value -ne 3) {
+    throw '4371 launcher profile no longer preserves its proven hook contract.'
+}
+if ($Profile5334.hook_topology -ne 'side_boundary_only' -or
+        $Profile5334.entry_offset -ne '0xc8ffd8' -or
+        $Profile5334.side_handler.offset -ne '0x80c3bc' -or
+        $Profile5334.side_handler.edge_field_offset -ne '0xf4' -or
+        $Profile5334.abi.runtime_state_offset -ne '0x132ab80' -or
+        $Profile5334.abi.runtime_ready_value -ne 0) {
+    throw '5334 launcher profile no longer matches the reviewed static boundary.'
+}
+foreach ($Needle in @(
+        'launcher-profiles.json',
+        'Generated from launcher-profiles.json',
+        'has no identity fingerprint',
+        'is missing a diagnostic hook fingerprint')) {
+    if (-not $Text.ProfileGenerator.Contains($Needle)) {
+        throw "Launcher profile generator validation is missing: $Needle"
     }
 }
 if ($Text.Native.Contains('gesture_type == kGestureTypeBack4371') -or

@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "4371",
+      "version_code": 801024371,
+      "version_name": "RELEASE-8.01.02.4371-260727-08131546-R",
+      "library_sha256": "a84365f864f88f85165b086bc03ba563efd09386c72f0c21926788fd90a028f9",
+      "image_span": "0x1400000",
+      "entry_offset": "0x885d00",
+      "identity_fingerprints": [
+        {
+          "name": "accepted_pilfer_call",
+          "offset": "0xbf07b0",
+          "bytes": "20 b2 1a 94 28 00 80 52 88 d6 05 39 48 03 42 f9"
+        }
+      ],
+      "hook_topology": "legacy_three_stage",
+      "side_handler": {
+        "offset": "0xc6e954",
+        "bytes": "ff 03 01 d1 fe 57 02 a9 f4 4f 03 a9 a8 3a 00 90 08 41 06 91 14 b0 43 39 08 fd df c8 f3 03 00 aa",
+        "edge_field_offset": "0xec"
+      },
+      "pointer_handler": {
+        "offset": "0xbf3684",
+        "bytes": "ea 0f 18 fc e9 23 01 6d fd 7b 02 a9 fc 6f 03 a9 fa 67 04 a9 f8 5f 05 a9 f6 57 06 a9 f4 4f 07 a9"
+      },
+      "touch_processor": {
+        "offset": "0xc0fe28",
+        "bytes": "ff 83 07 d1 ea b3 00 fd e9 23 17 6d fd 7b 18 a9 fc 6f 19 a9 fa 67 1a a9 f8 5f 1b a9 f6 57 1c a9 f4 4f 1d a9",
+        "gesture_type_field_offset": "0x130"
+      },
+      "pilfer": {
+        "accepted_return_offset": "0xbf07b4",
+        "home_return_offset": "0xc11a7c",
+        "accepted_caller_bytes": "e0 03 15 aa 20 b2 1a 94 28 00 80 52 88 d6 05 39"
+      },
+      "abi": {
+        "rstring_vtable_offset": "0x133cf20",
+        "filter_rstring_vtable_offset": "0x133bdb0",
+        "runtime_pointer_offset": "0x13cd7e8",
+        "runtime_state_offset": "0x13cd7f0",
+        "runtime_ready_value": 3
+      }
+    },
+    {
+      "id": "5334",
+      "version_code": 801025334,
+      "version_name": "RELEASE-8.01.02.5334-260807-08151151-R",
+      "library_sha256": "a67fe9e3ef3880f920cce92eb1c006c7fe12a83c0632f2397b118e6915043091",
+      "image_span": "0x1400000",
+      "entry_offset": "0xc8ffd8",
+      "identity_fingerprints": [
+        {
+          "name": "app_entry_point",
+          "offset": "0xc8ffd8",
+          "bytes": "ff c3 04 d1 fd 7b 0d a9 fc 6f 0e a9 fa 67 0f a9 f8 5f 10 a9 f6 57 11 a9 f4 4f 12 a9 fd 43 03 91 f9 03 08 aa fe 1f eb 97 c0 00 00 36 9e 20 eb 97"
+        }
+      ],
+      "hook_topology": "side_boundary_only",
+      "side_handler": {
+        "offset": "0x80c3bc",
+        "bytes": "ff 03 06 d1 ea 8b 00 fd e9 a3 11 6d fd fb 12 a9 fc 9f 00 f9 fa 67 14 a9 f8 5f 15 a9 f6 57 16 a9",
+        "edge_field_offset": "0xf4"
+      },
+      "pilfer": {
+        "accepted_return_offset": "0x0",
+        "home_return_offset": "0x0",
+        "accepted_caller_bytes": ""
+      },
+      "abi": {
+        "rstring_vtable_offset": "0x12b3608",
+        "filter_rstring_vtable_offset": "0x0",
+        "runtime_pointer_offset": "0x132ab78",
+        "runtime_state_offset": "0x132ab80",
+        "runtime_ready_value": 0
+      }
+    }
+  ]
+}

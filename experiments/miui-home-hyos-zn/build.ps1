@@ -28,12 +28,18 @@ foreach ($Path in @($CMakePath, $Toolchain, $NinjaPath, $ReadElf, $Nm, $ObjDump)
 & (Join-Path $SourceRoot 'verify-hsctl.ps1') | Out-Host
 
 New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
+$GeneratedInclude = Join-Path $BuildRoot 'generated\launcher_profiles.generated.h'
+$Python = (Get-Command python -ErrorAction Stop).Source
+& $Python (Join-Path $SourceRoot 'generate-launcher-profiles.py') `
+    --output $GeneratedInclude
+if ($LASTEXITCODE -ne 0) { throw "Launcher profile generation failed: $LASTEXITCODE" }
 & $CMakePath -S $SourceRoot -B $BuildRoot -G Ninja `
     "-DCMAKE_MAKE_PROGRAM=$NinjaPath" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     '-DANDROID_ABI=arm64-v8a' `
     '-DANDROID_PLATFORM=android-35' `
     '-DANDROID_STL=none' `
+    "-DLAUNCHER_PROFILE_INCLUDE_DIR=$(Split-Path -Parent $GeneratedInclude)" `
     "-DCMAKE_BUILD_TYPE=$Configuration"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed: $LASTEXITCODE" }
 
@@ -101,8 +107,17 @@ if ($Dynamic -match 'NEEDED.*(?:libc\+\+|libstdc\+\+)') {
     throw 'Native output has an unexpected shared C++ runtime dependency.'
 }
 
-$Version = '0.8.33-android17-4371-stub-back-systemui-handoff'
-$VersionCode = '40'
+$AppBuildGradle = Get-Content -LiteralPath (Join-Path $RepoRoot 'app\build.gradle') -Raw
+$VersionMatches = [regex]::Matches(
+    $AppBuildGradle, '(?m)^\s*versionName\s+"([^"]+)"\s*$')
+if ($VersionMatches.Count -ne 1) {
+    throw 'Unable to resolve one canonical app versionName from app/build.gradle.'
+}
+$Version = $VersionMatches[0].Groups[1].Value
+$VersionCode = (& git -C $RepoRoot rev-list --count HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $VersionCode -notmatch '^\d+$') {
+    throw 'Unable to derive the canonical versionCode from the Git commit count.'
+}
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Stage = Join-Path $RepoRoot "out\miui-home-hyos-zn\package-$Stamp"
 $StageLib = Join-Path $Stage 'lib\arm64'

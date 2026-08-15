@@ -1,4 +1,6 @@
 #include "zygisk_next_api.h"
+#include "launcher_profiles.h"
+#include "launcher_profiles.generated.h"
 
 #include <android/dlext.h>
 #include <android/log.h>
@@ -45,7 +47,6 @@ constexpr char kLogTag[] = "MiuiHomeHyosZn";
 // with the public wrapper's 48-byte result and aborted in Scudo.  The raw tail
 // shim preserves that ABI. Device validation remains bounded by the Zygisk
 // Next module enabled state, the exact process, and immutable library IDs.
-constexpr bool kArbiterBridgeImplementationReady = true;
 constexpr char kNativeReceiverExperimentLeasePath[] =
         "/data/user_de/0/com.miui.home/cache/"
         "miui_home_hyos_zn_native_receiver_once";
@@ -190,6 +191,7 @@ void* g_motion_get_device_id = nullptr;
 void* g_motion_get_source = nullptr;
 void* g_motion_get_raw_x = nullptr;
 uint8_t* g_launcher_base = nullptr;
+const miui_home_profiles::LauncherProfile* g_launcher_profile = nullptr;
 uint32_t g_native_receiver_state = 0;
 NativeResult g_module_receiver_registration{};
 int64_t g_systemui_arbiter_generation = 0;
@@ -282,9 +284,9 @@ __attribute__((used)) volatile uint64_t g_pilfer_observation_sequence = 0;
 __attribute__((used)) PilferObservation
         g_pilfer_observations[kPilferObservationCount]{};
 constexpr uint32_t kLauncherInputSlotCount = 4u;
-constexpr uintptr_t kLauncherImageSpan4371 = 0x1400000u;
 struct LauncherInputHookSlot {
     uintptr_t base;
+    const miui_home_profiles::LauncherProfile* profile;
     void* original_action;
     void* original_action_masked;
     void* original_pilfer;
@@ -562,7 +564,6 @@ bool IsArbiterBridgeEnabled() {
     return false;
 }
 
-constexpr uintptr_t kLauncherEntryOffset4371 = 0x885d00u;
 [[maybe_unused]] constexpr uintptr_t kBackCallbackQueryOffset4371 = 0x85ab4cu;
 [[maybe_unused]] constexpr uintptr_t kBackSwipeStartOffset4371 = 0xc0b440u;
 [[maybe_unused]] constexpr uintptr_t kBackCancelledOffset4371 = 0xc0d840u;
@@ -573,13 +574,6 @@ constexpr uintptr_t kLauncherEntryOffset4371 = 0x885d00u;
 // DOWN owner without either call. Keep these immutable callers as transparent
 // diagnostics and suppress them only if the exact stream was already handed
 // off at the processor's accepted DOWN boundary.
-constexpr uintptr_t kAcceptedPilferCallOffset4371 = 0xbf07b0u;
-constexpr uintptr_t kAcceptedPilferReturnOffset4371 = 0xbf07b4u;
-constexpr uintptr_t kHomeHelperPilferReturnOffset4371 = 0xc11a7cu;
-constexpr uintptr_t kGestureStubPointerHandlerOffset4371 = 0xbf3684u;
-constexpr uintptr_t kGestureBackTouchProcessorOffset4371 = 0xc0fe28u;
-constexpr uintptr_t kGestureStubBackHandlerOffset4371 = 0xc6e954u;
-constexpr uintptr_t kGestureTypeOffsetInProcessor4371 = 0x130u;
 // Exact 4371 device evidence proves GestureStubViewWindow::handle_back_gesture
 // is the side-only accepted-input boundary. Bottom Home never reaches it.
 // Ownership is enabled only there; shared GestureInputMonitor hooks remain
@@ -587,10 +581,6 @@ constexpr uintptr_t kGestureTypeOffsetInProcessor4371 = 0x130u;
 [[maybe_unused]] constexpr uintptr_t kRustLogFormatterOffset4371 = 0x688bacu;
 [[maybe_unused]] constexpr uintptr_t kAcceptedLogCallOffset4371 = 0xbf4bb8u;
 [[maybe_unused]] constexpr uintptr_t kAcceptedLogReturnOffset4371 = 0xbf4bc8u;
-constexpr uintptr_t kRStringVtableOffset4371 = 0x133cf20u;
-constexpr uintptr_t kFilterRStringVtableOffset4371 = 0x133bdb0u;
-constexpr uintptr_t kRuntimePointerOffset4371 = 0x13cd7e8u;
-constexpr uintptr_t kRuntimeStateOffset4371 = 0x13cd7f0u;
 
 constexpr char kSystemUiPackage[] = "com.android.systemui";
 constexpr char kArbiterStateAction[] =
@@ -631,33 +621,6 @@ constexpr char kAcceptedStateAction[] =
         0x08, 0xc4, 0x40, 0x39, 0xf3, 0x03, 0x00, 0xaa,
         0xf4, 0x03, 0x01, 0xaa, 0x48, 0x02, 0x00, 0x34,
 };
-constexpr uint8_t kAcceptedPilferCall4371[] = {
-        0x20, 0xb2, 0x1a, 0x94, 0x28, 0x00, 0x80, 0x52,
-        0x88, 0xd6, 0x05, 0x39, 0x48, 0x03, 0x42, 0xf9,
-};
-constexpr uint8_t kAcceptedPilferCaller4371[] = {
-        0xe0, 0x03, 0x15, 0xaa, 0x20, 0xb2, 0x1a, 0x94,
-        0x28, 0x00, 0x80, 0x52, 0x88, 0xd6, 0x05, 0x39,
-};
-constexpr uint8_t kGestureStubPointerHandlerPrologue4371[] = {
-        0xea, 0x0f, 0x18, 0xfc, 0xe9, 0x23, 0x01, 0x6d,
-        0xfd, 0x7b, 0x02, 0xa9, 0xfc, 0x6f, 0x03, 0xa9,
-        0xfa, 0x67, 0x04, 0xa9, 0xf8, 0x5f, 0x05, 0xa9,
-        0xf6, 0x57, 0x06, 0xa9, 0xf4, 0x4f, 0x07, 0xa9,
-};
-constexpr uint8_t kGestureBackTouchProcessorPrologue4371[] = {
-        0xff, 0x83, 0x07, 0xd1, 0xea, 0xb3, 0x00, 0xfd,
-        0xe9, 0x23, 0x17, 0x6d, 0xfd, 0x7b, 0x18, 0xa9,
-        0xfc, 0x6f, 0x19, 0xa9, 0xfa, 0x67, 0x1a, 0xa9,
-        0xf8, 0x5f, 0x1b, 0xa9, 0xf6, 0x57, 0x1c, 0xa9,
-        0xf4, 0x4f, 0x1d, 0xa9,
-};
-constexpr uint8_t kGestureStubBackHandlerPrologue4371[] = {
-        0xff, 0x03, 0x01, 0xd1, 0xfe, 0x57, 0x02, 0xa9,
-        0xf4, 0x4f, 0x03, 0xa9, 0xa8, 0x3a, 0x00, 0x90,
-        0x08, 0x41, 0x06, 0x91, 0x14, 0xb0, 0x43, 0x39,
-        0x08, 0xfd, 0xdf, 0xc8, 0xf3, 0x03, 0x00, 0xaa,
-};
 [[maybe_unused]] constexpr uint8_t kRustLogFormatterPrologue4371[] = {
         0xff, 0xc3, 0x02, 0xd1, 0xfe, 0x53, 0x00, 0xf9,
         0x49, 0x28, 0x40, 0xa9, 0x48, 0x10, 0x40, 0xf9,
@@ -668,6 +631,61 @@ constexpr uint8_t kGestureStubBackHandlerPrologue4371[] = {
         0x00, 0x19, 0x80, 0x52,
 };
 
+bool MatchesCode(const uint8_t* base, uintptr_t offset,
+                 const uint8_t* expected, size_t expected_size) {
+    return base != nullptr && expected != nullptr && expected_size != 0u &&
+            memcmp(base + offset, expected, expected_size) == 0;
+}
+
+bool MatchesLauncherProfile(
+        const uint8_t* base, void* app_entry_point,
+        const miui_home_profiles::LauncherProfile& profile) {
+    if (base == nullptr || app_entry_point != base + profile.entry_offset ||
+            profile.identity_fingerprints == nullptr ||
+            profile.identity_fingerprint_count == 0u) {
+        return false;
+    }
+    for (size_t index = 0u; index < profile.identity_fingerprint_count;
+         ++index) {
+        const auto& fingerprint = profile.identity_fingerprints[index];
+        if (!MatchesCode(base, fingerprint.offset, fingerprint.bytes,
+                         fingerprint.size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const miui_home_profiles::LauncherProfile* ResolveLauncherProfile(
+        void* app_entry_point, uint8_t** resolved_base) {
+    Dl_info info{};
+    if (resolved_base != nullptr) *resolved_base = nullptr;
+    if (app_entry_point == nullptr || dladdr(app_entry_point, &info) == 0 ||
+            info.dli_fbase == nullptr) {
+        return nullptr;
+    }
+    auto* base = static_cast<uint8_t*>(info.dli_fbase);
+    const miui_home_profiles::LauncherProfile* matched = nullptr;
+    for (const auto* profile : miui_home_profiles::kProfiles) {
+        if (profile != nullptr &&
+                MatchesLauncherProfile(base, app_entry_point, *profile)) {
+            if (matched != nullptr) return nullptr;
+            matched = profile;
+        }
+    }
+    const auto* current = AtomicLoad(&g_launcher_profile);
+    if (matched == nullptr || (current != nullptr && current != matched)) {
+        return nullptr;
+    }
+    if (current == nullptr) AtomicStore(&g_launcher_profile, matched);
+    if (resolved_base != nullptr) *resolved_base = base;
+    return matched;
+}
+
+const miui_home_profiles::LauncherProfile* CurrentLauncherProfile() {
+    return AtomicLoad(&g_launcher_profile);
+}
+
 bool IsExactCallbackName(const char* value, size_t length,
                          const char* expected) {
     if (value == nullptr || expected == nullptr) return false;
@@ -677,7 +695,9 @@ bool IsExactCallbackName(const char* value, size_t length,
 }
 
 bool MakeOwnedRString(const char* source, RString* output) {
-    if (source == nullptr || output == nullptr || g_launcher_base == nullptr) {
+    const auto* profile = CurrentLauncherProfile();
+    if (source == nullptr || output == nullptr || g_launcher_base == nullptr ||
+            profile == nullptr || profile->rstring_vtable_offset == 0u) {
         return false;
     }
     const size_t length = ConstStringLength(source);
@@ -687,7 +707,7 @@ bool MakeOwnedRString(const char* source, RString* output) {
     output->data = data;
     output->length = length;
     output->capacity = length;
-    output->vtable = g_launcher_base + kRStringVtableOffset4371;
+    output->vtable = g_launcher_base + profile->rstring_vtable_offset;
     return true;
 }
 
@@ -1063,9 +1083,11 @@ bool SendNativeBroadcast(const char* action, void* extras) {
             "Bundle_default");
     BundleDropFn bundle_drop = ResolveLauncherSymbol<BundleDropFn>(
             "Bundle_drop");
-    if (g_launcher_base == nullptr ||
+    const auto* profile = CurrentLauncherProfile();
+    if (g_launcher_base == nullptr || profile == nullptr ||
             AtomicLoad(reinterpret_cast<uint32_t*>(
-                    g_launcher_base + kRuntimeStateOffset4371)) != 3u) {
+                    g_launcher_base + profile->runtime_state_offset)) !=
+                    profile->runtime_ready_value) {
         AtomicStore(&g_native_broadcast_send_state, uint32_t{2});
         return false;
     }
@@ -1100,7 +1122,7 @@ bool SendNativeBroadcast(const char* action, void* extras) {
         set_extras(intent, extras);
     }
     void* runtime = AtomicLoad(reinterpret_cast<void**>(
-            g_launcher_base + kRuntimePointerOffset4371));
+            g_launcher_base + profile->runtime_pointer_offset));
     if (runtime == nullptr) {
         AtomicStore(&g_native_broadcast_send_state, uint32_t{7});
         intent_drop(intent);
@@ -1189,11 +1211,6 @@ void TryInstallArbiterBridge() {
     if (!IsExplicitlyEnabled() || !IsBusinessProbeEnabled() ||
             !IsArbiterBridgeEnabled() || !IsLauncherProcess() ||
             AtomicLoad(&g_business_hook_state) != uint32_t{3}) {
-        return;
-    }
-    if (!kArbiterBridgeImplementationReady) {
-        AtomicStore(&g_native_receiver_state, uint32_t{199});
-        AtomicStore(&g_arbiter_bridge_hook_state, uint32_t{4});
         return;
     }
     uint32_t state = AtomicLoad(&g_arbiter_bridge_hook_state);
@@ -1301,7 +1318,12 @@ void TryInstallArbiterBridge() {
     // IntentFilter is built by a different Rust crate instance than
     // Intent/Bundle on launcher 4371 and therefore owns a distinct abi_stable
     // RString vtable.
-    action.vtable = g_launcher_base + kFilterRStringVtableOffset4371;
+    const auto* profile = CurrentLauncherProfile();
+    if (profile == nullptr || profile->filter_rstring_vtable_offset == 0u) {
+        AtomicStore(&g_native_receiver_state, uint32_t{4});
+        return result;
+    }
+    action.vtable = g_launcher_base + profile->filter_rstring_vtable_offset;
     add_action(module_filter, &action);
     Log(ANDROID_LOG_INFO, "separate native receiver action added");
 
@@ -1427,13 +1449,17 @@ bool CurrentEventMatchesOwnedStream(void* event) {
 
 void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
     uintptr_t caller_base = 0u;
+    const miui_home_profiles::LauncherProfile* caller_profile = nullptr;
     InputMonitorPilferFn original = nullptr;
     for (uint32_t index = 0u; index < kLauncherInputSlotCount; ++index) {
         LauncherInputHookSlot& slot = g_launcher_input_slots[index];
         const uintptr_t base = AtomicLoad(&slot.base);
-        if (AtomicLoad(&slot.state) == uint32_t{3} &&
-                return_pc >= base && return_pc - base < kLauncherImageSpan4371) {
+        const auto* profile = AtomicLoad(&slot.profile);
+        if (AtomicLoad(&slot.state) == uint32_t{3} && profile != nullptr &&
+                return_pc >= base &&
+                return_pc - base < profile->image_span) {
             caller_base = base;
+            caller_profile = profile;
             original = reinterpret_cast<InputMonitorPilferFn>(
                     AtomicLoad(&slot.original_pilfer));
             break;
@@ -1447,6 +1473,7 @@ void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
     __atomic_store_n(&g_pilfer_last_return_pc, return_pc, __ATOMIC_RELEASE);
     const uintptr_t offset_base = caller_base != 0u
             ? caller_base : reinterpret_cast<uintptr_t>(g_launcher_base);
+    if (caller_profile == nullptr) caller_profile = CurrentLauncherProfile();
     const intptr_t return_offset = offset_base == 0u
             ? intptr_t{-1}
             : static_cast<intptr_t>(return_pc - offset_base);
@@ -1461,7 +1488,7 @@ void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
             __atomic_fetch_add(&g_pilfer_caller_bf07b4_count, uint32_t{1},
                                __ATOMIC_RELAXED);
             break;
-        case kHomeHelperPilferReturnOffset4371:
+        case 0xc11a7c:
             __atomic_fetch_add(&g_pilfer_caller_c11a7c_count, uint32_t{1},
                                __ATOMIC_RELAXED);
             break;
@@ -1497,17 +1524,24 @@ void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
                      __ATOMIC_RELEASE);
 
     const bool exact_primary_return = offset_base != 0u &&
-            return_offset ==
-                    static_cast<intptr_t>(kAcceptedPilferReturnOffset4371);
-    const bool exact_caller_fingerprint = return_pc >= 8u &&
+            caller_profile != nullptr &&
+            caller_profile->accepted_pilfer_return_offset != 0u &&
+            return_offset == static_cast<intptr_t>(
+                    caller_profile->accepted_pilfer_return_offset);
+    const bool exact_caller_fingerprint = caller_profile != nullptr &&
+            caller_profile->accepted_pilfer_caller != nullptr &&
+            caller_profile->accepted_pilfer_caller_size != 0u &&
+            return_pc >= 8u &&
             memcmp(reinterpret_cast<const void*>(return_pc - 8u),
-                   kAcceptedPilferCaller4371,
-                   sizeof(kAcceptedPilferCaller4371)) == 0;
+                   caller_profile->accepted_pilfer_caller,
+                   caller_profile->accepted_pilfer_caller_size) == 0;
     const bool ordinary_back_boundary = exact_primary_return ||
             exact_caller_fingerprint;
     if ((ordinary_back_boundary ||
-            return_offset == static_cast<intptr_t>(
-                    kHomeHelperPilferReturnOffset4371)) &&
+            (caller_profile != nullptr &&
+             caller_profile->home_pilfer_return_offset != 0u &&
+             return_offset == static_cast<intptr_t>(
+                    caller_profile->home_pilfer_return_offset))) &&
             CurrentMotionMatchesOwnedStream(monitor)) {
         __atomic_fetch_add(&g_owned_stream_pilfer_suppressed_count,
                            uint32_t{1}, __ATOMIC_RELAXED);
@@ -1533,10 +1567,13 @@ void HookGestureStubBackHandler(void* stub_window, void* event) {
     __atomic_store_n(&g_stub_back_action_last,
                      static_cast<uint32_t>(action), __ATOMIC_RELAXED);
     uint32_t stub_edge = 0xffffffffu;
-    if (stub_window != nullptr) {
+    const auto* profile = CurrentLauncherProfile();
+    if (stub_window != nullptr && profile != nullptr &&
+            profile->side_edge_field_offset != 0u) {
         stub_edge = static_cast<uint32_t>(
                 *reinterpret_cast<const uint8_t*>(
-                reinterpret_cast<const uint8_t*>(stub_window) + 0xecu));
+                reinterpret_cast<const uint8_t*>(stub_window) +
+                profile->side_edge_field_offset));
         __atomic_store_n(&g_stub_back_edge_last, stub_edge, __ATOMIC_RELAXED);
     }
     volatile uint32_t* counter = nullptr;
@@ -1670,11 +1707,13 @@ void HookGestureBackTouchProcessor(void* processor, void* event, void* state) {
     GestureBackTouchProcessorFn original =
             reinterpret_cast<GestureBackTouchProcessorFn>(
                     AtomicLoad(&g_original_gesture_back_touch_processor));
-    const uint32_t gesture_type = processor == nullptr
+    const auto* profile = CurrentLauncherProfile();
+    const uint32_t gesture_type = processor == nullptr || profile == nullptr ||
+            profile->gesture_type_field_offset == 0u
             ? uint32_t{0}
             : *reinterpret_cast<const uint32_t*>(
                     reinterpret_cast<const uint8_t*>(processor) +
-                    kGestureTypeOffsetInProcessor4371);
+                    profile->gesture_type_field_offset);
     __atomic_store_n(&g_inner_gesture_type_last, gesture_type,
                      __ATOMIC_RELAXED);
     if (gesture_type == 1u) {
@@ -1878,25 +1917,10 @@ int32_t HookMotionGetActionMasked3(void* event) {
     return result;
 }
 
-bool MatchesCode(const uint8_t* base, uintptr_t offset,
-                 const uint8_t* expected, size_t expected_size) {
-    return base != nullptr && expected != nullptr && expected_size != 0u &&
-            memcmp(base + offset, expected, expected_size) == 0;
-}
-
-bool InstallLauncherInputHooks4371(void* app_entry_point) {
-    Dl_info info{};
-    if (app_entry_point == nullptr || dladdr(app_entry_point, &info) == 0 ||
-            info.dli_fbase == nullptr) {
-        return false;
-    }
-    auto* base = static_cast<uint8_t*>(info.dli_fbase);
-    if (app_entry_point != base + kLauncherEntryOffset4371 ||
-            !MatchesCode(base, kAcceptedPilferCallOffset4371,
-                         kAcceptedPilferCall4371,
-                         sizeof(kAcceptedPilferCall4371))) {
-        return false;
-    }
+bool InstallLauncherInputHooksForProfile(void* app_entry_point) {
+    uint8_t* base = nullptr;
+    const auto* profile = ResolveLauncherProfile(app_entry_point, &base);
+    if (profile == nullptr || base == nullptr) return false;
     for (uint32_t index = 0u; index < kLauncherInputSlotCount; ++index) {
         LauncherInputHookSlot& existing = g_launcher_input_slots[index];
         if (AtomicLoad(&existing.base) ==
@@ -1919,6 +1943,7 @@ bool InstallLauncherInputHooks4371(void* app_entry_point) {
     };
     LauncherInputHookSlot& slot = g_launcher_input_slots[index];
     AtomicStore(&slot.base, reinterpret_cast<uintptr_t>(base));
+    AtomicStore(&slot.profile, profile);
     AtomicStore(&slot.state, uint32_t{1});
     if (g_api.pltHook(base, "input_MotionEvent_getAction",
                       reinterpret_cast<void*>(kActionHooks[index]),
@@ -1951,32 +1976,33 @@ bool InstallLauncherInputHooks4371(void* app_entry_point) {
     return true;
 }
 
-bool InstallClaimedBusinessHooks4371(void* app_entry_point, bool repair) {
-    Dl_info info{};
-    if (app_entry_point == nullptr || dladdr(app_entry_point, &info) == 0 ||
-            info.dli_fbase == nullptr) {
+bool InstallClaimedBusinessHooksForProfile(void* app_entry_point, bool repair) {
+    uint8_t* base = nullptr;
+    const auto* profile = ResolveLauncherProfile(app_entry_point, &base);
+    if (profile == nullptr || base == nullptr) {
         AtomicStore(&g_business_hook_state, uint32_t{4});
-        Log(ANDROID_LOG_ERROR, "business probe failed to resolve launcher base");
+        Log(ANDROID_LOG_ERROR,
+            "business probe failed to resolve a supported launcher profile");
         return false;
     }
-    auto* base = static_cast<uint8_t*>(info.dli_fbase);
     g_launcher_base = base;
-    if (app_entry_point != base + kLauncherEntryOffset4371 ||
-            !MatchesCode(base, kAcceptedPilferCallOffset4371,
-                         kAcceptedPilferCall4371,
-                         sizeof(kAcceptedPilferCall4371)) ||
-            !MatchesCode(base, kGestureStubPointerHandlerOffset4371,
-                         kGestureStubPointerHandlerPrologue4371,
-                         sizeof(kGestureStubPointerHandlerPrologue4371)) ||
-            !MatchesCode(base, kGestureBackTouchProcessorOffset4371,
-                         kGestureBackTouchProcessorPrologue4371,
-                         sizeof(kGestureBackTouchProcessorPrologue4371)) ||
-            !MatchesCode(base, kGestureStubBackHandlerOffset4371,
-                         kGestureStubBackHandlerPrologue4371,
-                         sizeof(kGestureStubBackHandlerPrologue4371))) {
+    const bool side_matches = MatchesCode(
+            base, profile->side_handler_offset,
+            profile->side_handler_prologue,
+            profile->side_handler_prologue_size);
+    const bool legacy_matches =
+            profile->business_topology !=
+                    miui_home_profiles::BusinessHookTopology::kLegacyThreeStage ||
+            (MatchesCode(base, profile->pointer_handler_offset,
+                         profile->pointer_handler_prologue,
+                         profile->pointer_handler_prologue_size) &&
+             MatchesCode(base, profile->touch_processor_offset,
+                         profile->touch_processor_prologue,
+                         profile->touch_processor_prologue_size));
+    if (!side_matches || !legacy_matches) {
         AtomicStore(&g_business_hook_state, uint32_t{5});
         Log(ANDROID_LOG_ERROR,
-            "business probe rejected unsupported libapp_launcher.so");
+            "business probe rejected profile hook fingerprints");
         return false;
     }
 
@@ -2013,7 +2039,7 @@ bool InstallClaimedBusinessHooks4371(void* app_entry_point, bool repair) {
     // the outer accepted-DOWN handler publishes thread-local ownership, so a
     // later failure cannot leave Xiaomi business unconditionally disabled.
     if (g_api.inlineHook(
-                base + kGestureStubBackHandlerOffset4371,
+                base + profile->side_handler_offset,
                 reinterpret_cast<void*>(HookGestureStubBackHandler),
                 &g_original_gesture_stub_back_handler) != ZN_SUCCESS ||
             AtomicLoad(&g_original_gesture_stub_back_handler) == nullptr) {
@@ -2021,36 +2047,42 @@ bool InstallClaimedBusinessHooks4371(void* app_entry_point, bool repair) {
         Log(ANDROID_LOG_ERROR, "GestureStub Back handler hook failed");
         return false;
     }
-    // Install the inner hook next. It is transparent until the outer
-    // accepted-DOWN handler publishes thread-local ownership, so a failure of
-    // the second hook cannot leave Xiaomi business unconditionally disabled.
-    if (g_api.inlineHook(
-                base + kGestureBackTouchProcessorOffset4371,
-                reinterpret_cast<void*>(HookGestureBackTouchProcessor),
-                &g_original_gesture_back_touch_processor) != ZN_SUCCESS ||
-            AtomicLoad(&g_original_gesture_back_touch_processor) == nullptr) {
-        AtomicStore(&g_business_hook_state, uint32_t{6});
-        Log(ANDROID_LOG_ERROR, "inner processor business hook failed");
-        return false;
-    }
-    if (g_api.inlineHook(
-                base + kGestureStubPointerHandlerOffset4371,
-                reinterpret_cast<void*>(HookGestureStubPointerHandler),
-                &g_original_gesture_stub_pointer_handler) != ZN_SUCCESS ||
-            AtomicLoad(&g_original_gesture_stub_pointer_handler) == nullptr) {
-        AtomicStore(&g_business_hook_state, uint32_t{6});
-        Log(ANDROID_LOG_ERROR, "accepted-DOWN outer handler hook failed");
-        return false;
+    if (profile->business_topology ==
+            miui_home_profiles::BusinessHookTopology::kLegacyThreeStage) {
+        // 4371 still has the two transparent diagnostic stages around the
+        // side-only boundary. They never claim a stream themselves.
+        if (g_api.inlineHook(
+                    base + profile->touch_processor_offset,
+                    reinterpret_cast<void*>(HookGestureBackTouchProcessor),
+                    &g_original_gesture_back_touch_processor) != ZN_SUCCESS ||
+                AtomicLoad(&g_original_gesture_back_touch_processor) == nullptr) {
+            AtomicStore(&g_business_hook_state, uint32_t{6});
+            Log(ANDROID_LOG_ERROR, "inner processor business hook failed");
+            return false;
+        }
+        if (g_api.inlineHook(
+                    base + profile->pointer_handler_offset,
+                    reinterpret_cast<void*>(HookGestureStubPointerHandler),
+                    &g_original_gesture_stub_pointer_handler) != ZN_SUCCESS ||
+                AtomicLoad(&g_original_gesture_stub_pointer_handler) == nullptr) {
+            AtomicStore(&g_business_hook_state, uint32_t{6});
+            Log(ANDROID_LOG_ERROR, "accepted-DOWN outer handler hook failed");
+            return false;
+        }
     }
     AtomicStore(&g_business_hook_state, uint32_t{3});
-    Log(ANDROID_LOG_INFO, repair
-            ? "4371 remapped Launcher text repaired with narrow business hook"
-            : "4371 accepted-DOWN handoff with narrow business hook installed");
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+            "%s profile %s with %s business hook",
+            profile->id, repair ? "repaired" : "installed",
+            profile->business_topology ==
+                    miui_home_profiles::BusinessHookTopology::kLegacyThreeStage
+                    ? "legacy diagnostics + side boundary"
+                    : "side boundary only");
     if (IsArbiterBridgeEnabled()) TryInstallArbiterBridge();
     return true;
 }
 
-void InstallBusinessHooks4371(void* app_entry_point) {
+void InstallBusinessHooksForProfile(void* app_entry_point) {
     if (!IsBusinessProbeEnabled() || g_api.inlineHook == nullptr) return;
     uint32_t expected_state = 0u;
     if (!__atomic_compare_exchange_n(&g_business_hook_state, &expected_state,
@@ -2058,7 +2090,7 @@ void InstallBusinessHooks4371(void* app_entry_point) {
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return;
     }
-    InstallClaimedBusinessHooks4371(app_entry_point, false);
+    InstallClaimedBusinessHooksForProfile(app_entry_point, false);
 }
 
 void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
@@ -2070,24 +2102,30 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
     }
     auto* base = reinterpret_cast<uint8_t*>(
             AtomicLoad(&g_launcher_input_slots[slot_index].base));
-    if (base == nullptr || base != g_launcher_base) return;
+    const auto* profile = AtomicLoad(
+            &g_launcher_input_slots[slot_index].profile);
+    if (base == nullptr || base != g_launcher_base || profile == nullptr ||
+            profile != CurrentLauncherProfile()) return;
     const bool outer_original = MatchesCode(
-            base, kGestureStubPointerHandlerOffset4371,
-            kGestureStubPointerHandlerPrologue4371,
-            sizeof(kGestureStubPointerHandlerPrologue4371));
+            base, profile->pointer_handler_offset,
+            profile->pointer_handler_prologue,
+            profile->pointer_handler_prologue_size);
     const bool inner_original = MatchesCode(
-            base, kGestureBackTouchProcessorOffset4371,
-            kGestureBackTouchProcessorPrologue4371,
-            sizeof(kGestureBackTouchProcessorPrologue4371));
+            base, profile->touch_processor_offset,
+            profile->touch_processor_prologue,
+            profile->touch_processor_prologue_size);
     const bool stub_back_handler_original = MatchesCode(
-            base, kGestureStubBackHandlerOffset4371,
-            kGestureStubBackHandlerPrologue4371,
-            sizeof(kGestureStubBackHandlerPrologue4371));
-    if (!outer_original && !inner_original && !stub_back_handler_original) {
+            base, profile->side_handler_offset,
+            profile->side_handler_prologue,
+            profile->side_handler_prologue_size);
+    const bool legacy = profile->business_topology ==
+            miui_home_profiles::BusinessHookTopology::kLegacyThreeStage;
+    if (!stub_back_handler_original &&
+            (!legacy || (!outer_original && !inner_original))) {
         return;
     }
-    if (outer_original != inner_original ||
-            outer_original != stub_back_handler_original) {
+    if (legacy && (outer_original != inner_original ||
+            outer_original != stub_back_handler_original)) {
         __atomic_store_n(&g_business_repair_stage, uint32_t{6},
                          __ATOMIC_RELEASE);
         __atomic_fetch_add(&g_business_repair_failure_count, uint32_t{1},
@@ -2106,13 +2144,13 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
                        __ATOMIC_RELAXED);
     __atomic_store_n(&g_business_repair_stage, uint32_t{1}, __ATOMIC_RELEASE);
     const int stub_back_handler_unhook = g_api.inlineUnhook(
-            base + kGestureStubBackHandlerOffset4371);
-    const int inner_unhook = g_api.inlineUnhook(
-            base + kGestureBackTouchProcessorOffset4371);
-    const int outer_unhook = g_api.inlineUnhook(
-            base + kGestureStubPointerHandlerOffset4371);
-    if (stub_back_handler_unhook != ZN_SUCCESS ||
-            inner_unhook != ZN_SUCCESS || outer_unhook != ZN_SUCCESS) {
+            base + profile->side_handler_offset);
+    const int inner_unhook = legacy ? g_api.inlineUnhook(
+            base + profile->touch_processor_offset) : ZN_SUCCESS;
+    const int outer_unhook = legacy ? g_api.inlineUnhook(
+            base + profile->pointer_handler_offset) : ZN_SUCCESS;
+    if (stub_back_handler_unhook != ZN_SUCCESS || inner_unhook != ZN_SUCCESS ||
+            outer_unhook != ZN_SUCCESS) {
         __atomic_store_n(&g_business_repair_stage, uint32_t{4},
                          __ATOMIC_RELEASE);
         AtomicStore(&g_business_hook_state, uint32_t{7});
@@ -2129,8 +2167,8 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
                 static_cast<void*>(nullptr));
     AtomicStore(&g_original_gesture_stub_pointer_handler,
                 static_cast<void*>(nullptr));
-    const bool repaired = InstallClaimedBusinessHooks4371(
-            base + kLauncherEntryOffset4371, true);
+    const bool repaired = InstallClaimedBusinessHooksForProfile(
+            base + profile->entry_offset, true);
     __atomic_store_n(&g_business_repair_stage,
                      repaired ? uint32_t{3} : uint32_t{5},
                      __ATOMIC_RELEASE);
@@ -2190,12 +2228,12 @@ void* HookAppPublicDlsym(void* handle, const char* symbol) {
                                 __ATOMIC_ACQ_REL) == 0u) {
             Log(ANDROID_LOG_INFO, "resolved MiuiHome app_entry_point");
         }
-        if (!InstallLauncherInputHooks4371(result)) {
+        if (!InstallLauncherInputHooksForProfile(result)) {
             Log(ANDROID_LOG_ERROR,
                 "failed to install per-image launcher input hooks");
             return result;
         }
-        InstallBusinessHooks4371(result);
+        InstallBusinessHooksForProfile(result);
     }
     return result;
 }

@@ -1,0 +1,47 @@
+# shellcheck disable=SC2034
+SKIPUNZIP=1
+
+SONAME=miui_home_hyos_zn
+
+if [ "$BOOTMODE" ] && [ "$KSU" ]; then
+  ui_print "- Installing from KernelSU"
+  if command -v magisk >/dev/null 2>&1; then
+    abort "! Multiple root implementations are not supported"
+  fi
+elif [ "$BOOTMODE" ] && [ "$MAGISK_VER_CODE" ]; then
+  ui_print "- Installing from Magisk"
+else
+  abort "! Install from the KernelSU or Magisk app/CLI"
+fi
+
+[ "$ARCH" = arm64 ] || abort "! Unsupported platform: $ARCH"
+
+ui_print "- Extracting verifier"
+unzip -o "$ZIPFILE" verify.sh -d "$TMPDIR" >&2
+[ -f "$TMPDIR/verify.sh" ] || abort "! Unable to extract verify.sh"
+. "$TMPDIR/verify.sh"
+
+extract "$ZIPFILE" customize.sh "$TMPDIR/.vunzip"
+extract "$ZIPFILE" verify.sh "$TMPDIR/.vunzip"
+extract "$ZIPFILE" module.prop "$MODPATH"
+extract "$ZIPFILE" zn_modules.txt "$MODPATH"
+extract "$ZIPFILE" diagnostics.map "$MODPATH"
+extract "$ZIPFILE" uninstall.sh "$MODPATH"
+extract "$ZIPFILE" README.md "$MODPATH"
+
+mkdir -p "$MODPATH/bin" "$MODPATH/lib"
+extract "$ZIPFILE" bin/hsctl "$MODPATH"
+extract "$ZIPFILE" "lib/arm64/lib$SONAME.so" "$MODPATH/lib" true
+
+set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
+set_perm_recursive "$MODPATH/lib" 0 0 0755 0644
+set_perm "$MODPATH/diagnostics.map" 0 0 0644
+
+# Remove only obsolete pre-0.8.16 marker files. Native processes cannot read
+# this directory; Zygisk Next's module state is the sole runtime gate.
+rm -f "$MODPATH/run/enabled" \
+  "$MODPATH/run/business_enabled" \
+  "$MODPATH/run/arbiter_bridge_enabled" \
+  "$MODPATH/run/native_receiver_enabled"
+ui_print "- Zygisk Next module state is the sole runtime gate"
+ui_print "- No process was restarted; reboot manually when ready"

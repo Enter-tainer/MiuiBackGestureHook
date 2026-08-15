@@ -19,14 +19,23 @@ app/build/outputs/apk/debug/app-debug.apk
 Checked-in AOSP reference snippets live under:
 
 ```text
-refs/aosp_back/
+refs/android16/aosp_back_16/
 ```
 
 The directory is split by component:
 
 ```text
-refs/aosp_back/shell/
-refs/aosp_back/systemui/
+refs/android16/aosp_back_16/shell/
+refs/android16/aosp_back_16/systemui/
+```
+
+Xiaomi APKs, JARs, native libraries, decompilation, and device evidence remain local-only
+under ignored `refs/android17` paths and must not be committed. See `refs/README.md`.
+
+The native `hyos_spawner` research module source and safe deployment tooling live under:
+
+```text
+experiments/miui-home-hyos-zn/
 ```
 
 ## Scope
@@ -47,8 +56,7 @@ system
 
 ## Compatibility
 
-The MiuiHome integration is best matched with Xiaomi System Launcher
-version `7.50.xx`.
+The Android 17 native MiuiHome integration targets Xiaomi System Launcher build `4371` only.
 
 ## Hot Reload
 

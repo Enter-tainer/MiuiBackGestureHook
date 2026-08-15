@@ -17,3 +17,27 @@ keystore/
 app/build/
 logs/
 reports/
+out/
+
+# Local-only Xiaomi/vendor references and reverse-engineering outputs.
+# Keep these files on the workstation; never publish proprietary binaries or decompilation.
+/refs/android17/hyperos-framework/
+/refs/android17/miui-home-*/
+/refs/android17/miui-wmshell/
+/refs/**/*.apk
+/refs/**/*.jar
+/refs/**/*.so
+/refs/**/*.dylib
+/refs/**/*.dex
+/refs/**/*.odex
+/refs/**/*.vdex
+/refs/**/*.oat
+
+# Native experiment build/package/evidence outputs.
+/experiments/**/out/
+/experiments/**/.cxx/
+/experiments/**/build/
+/experiments/**/*.so
+/experiments/**/*.zip
+/experiments/**/diagnostics.map
+/experiments/**/module.prop

@@ -122,6 +122,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             monitor.detach();
         }
         nativeInputMonitors.clear();
+        destroySystemUiPlatformImpl();
         param.setSavedInstanceState(new Object[]{
                 inputState, Boolean.valueOf(savedMiuiOverviewVisible),
                 Long.valueOf(savedMiuiOverviewDismissDeadline),
@@ -142,12 +143,14 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
 
     @Override
     public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
-        processName = param.getProcessName();
+        String reportedProcessName = param.getProcessName();
         int replaced = 0;
         Set<String> oldHookIds = new java.util.HashSet<>();
         boolean hadServerHook = false;
+        boolean hadSystemUiHook = false;
         ClassLoader hotReloadClassLoader = null;
         ClassLoader oldSystemServerClassLoader = null;
+        ClassLoader oldSystemUiClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
             try {
                 String oldHookId = oldHandle.getId();
@@ -155,6 +158,13 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         && (oldHookId.startsWith("server_")
                         || "predictive_opt_in_system_server".equals(oldHookId));
                 hadServerHook |= oldServerHook;
+                boolean oldSystemUiHook = oldHookId != null
+                        && (oldHookId.startsWith("systemui_")
+                        || oldHookId.startsWith("shell_back_")
+                        || oldHookId.startsWith("shell_cross_")
+                        || oldHookId.startsWith("shell_return_")
+                        || oldHookId.startsWith("shell_default_"));
+                hadSystemUiHook |= oldSystemUiHook;
                 ClassLoader oldExecutableClassLoader = null;
                 if (oldHandle.getExecutable() != null
                         && oldHandle.getExecutable().getDeclaringClass() != null) {
@@ -172,6 +182,17 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         oldSystemServerClassLoader = oldExecutableClassLoader;
                     } catch (Throwable ignored) {
                         // Try the next old system-server hook executable.
+                    }
+                }
+                if (oldSystemUiClassLoader == null && oldSystemUiHook
+                        && oldExecutableClassLoader != null) {
+                    try {
+                        Class.forName(EDGE_BACK_GESTURE_HANDLER, false,
+                                oldExecutableClassLoader);
+                        oldSystemUiClassLoader = oldExecutableClassLoader;
+                    } catch (Throwable ignored) {
+                        // A Shell hook may use the Shell loader; keep scanning
+                        // until an executable exposes the SystemUI classes.
                     }
                 }
                 boolean freeformRoleNormalizer =
@@ -212,7 +233,30 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 moduleLog(Log.WARN, TAG, "Failed to replace old hook: " + oldHandle, throwable);
             }
         }
+        if (hadSystemUiHook) {
+            processName = SYSTEM_UI;
+        } else {
+            processName = reportedProcessName;
+        }
         restoreHotReloadInput(param.getSavedInstanceState());
+        if (hadSystemUiHook && oldSystemUiClassLoader == null) {
+            for (Object[] pair : pendingHotReloadInputState) {
+                if (pair == null || pair.length == 0 || pair[0] == null) {
+                    continue;
+                }
+                ClassLoader candidate = pair[0].getClass().getClassLoader();
+                try {
+                    Class.forName(EDGE_BACK_GESTURE_HANDLER, false, candidate);
+                    oldSystemUiClassLoader = candidate;
+                    break;
+                } catch (Throwable ignored) {
+                    // Keep the lifecycle fail-closed if the saved owner is stale.
+                }
+            }
+        }
+        if (hadSystemUiHook && oldSystemUiClassLoader != null) {
+            hotReloadClassLoader = oldSystemUiClassLoader;
+        }
         boolean shouldInstallServerHooks = param.isSystemServer()
                 || "system".equals(processName)
                 || hadServerHook;
@@ -224,8 +268,23 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             ClassLoader serverClassLoader = findSystemServerClassLoader(
                     preferredServerClassLoader);
             if (serverClassLoader != null) {
+                try {
+                    // Re-resolve the Android 16/17 server adapter from the real package
+                    // ClassLoader before backfilling version-specific method signatures.
+                    // Replacement hookers remain lazy so an already-replaced handle cannot
+                    // race this selection during hot-reload restoration.
+                    selectSystemServerPlatformImpl(serverClassLoader);
+                } catch (Throwable throwable) {
+                    moduleLog(Log.ERROR, TAG,
+                            "Failed to restore system_server platform implementation"
+                                    + " after hot reload",
+                            throwable);
+                }
                 if (!oldHookIds.contains("server_back_window_start_animation")) {
                     hookBackWindowStartAnimation(serverClassLoader);
+                }
+                if (!oldHookIds.contains("server_a17_opening_surface_visibility")) {
+                    hookA17OpeningSurfaceVisibility(serverClassLoader);
                 }
                 if (!oldHookIds.contains(
                         "server_freeform_prepare_role_normalization")) {
@@ -248,6 +307,17 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             }
         }
         if (SYSTEM_UI.equals(processName) && hotReloadClassLoader != null) {
+            try {
+                // Platform adapters own version-specific field, signature and native-panel
+                // access. They are deliberately destroyed before the old runtime is replaced,
+                // so select the Android 16/17 adapter again before any restored input monitor
+                // or replacement hook can observe an event.
+                selectSystemUiPlatformImpl(hotReloadClassLoader);
+            } catch (Throwable throwable) {
+                moduleLog(Log.ERROR, TAG,
+                        "Failed to restore SystemUI platform implementation after hot reload",
+                        throwable);
+            }
             Class<?> hotReloadBackControllerClass = null;
             if (!oldHookIds.contains("shell_back_onBackAnimationFinished")
                     || !oldHookIds.contains("shell_back_finishBackAnimation")
@@ -342,6 +412,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             }
             if (!oldHookIds.contains("systemui_status_bar_transient_appearance")) {
                 hookStatusBarTransientAppearance(hotReloadClassLoader);
+            }
+            if (!oldHookIds.contains(
+                    "systemui_a17_back_background_status_reset")) {
+                hookPlatformBackAnimationStatusBarReset(hotReloadClassLoader);
             }
             if (!oldHookIds.contains("systemui_navigation_bar_gesture_insets")) {
                 hookNavigationBarGestureInsets(hotReloadClassLoader);
@@ -611,6 +685,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::preserveTransientBarAppearance;
             case "systemui_navigation_bar_show_transient":
                 return this::preserveTransientBarAutoHide;
+            case "systemui_a17_back_background_status_reset":
+                return this::neutralizeBrokenBackAnimationStatusBarReset;
             case "systemui_navigation_bar_gesture_insets":
                 return this::restoreNavigationBarGestureInsets;
             case "systemui_navigation_bar_controller_create":
@@ -691,6 +767,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::observeMiuiHomeReturnHomeWallpaperAnim;
             case "server_back_window_start_animation":
                 return this::prepareOpeningTaskFragment;
+            case "server_a17_opening_surface_visibility":
+                return this::restoreA17OpeningSurfaceVisibility;
             case "server_freeform_prepare_role_normalization":
                 return this::normalizeFreeformCrossActivityTransitionInfo;
             case "server_schedule_animation_prepare_transition":
@@ -894,13 +972,17 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
 
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
-        processName = param.getPackageName();
-        moduleLog(Log.INFO, TAG, "Package loaded: " + processName
+        String loadedPackage = param.getPackageName();
+        if (SYSTEM_UI.equals(loadedPackage) || MIUI_HOME.equals(loadedPackage)
+                || processName == null) {
+            processName = loadedPackage;
+        }
+        moduleLog(Log.INFO, TAG, "Package loaded: " + loadedPackage
                 + ", classLoader=" + param.getDefaultClassLoader()
                 + ", sourceDir=" + param.getApplicationInfo().sourceDir);
-        if (SYSTEM_UI.equals(processName)) {
+        if (SYSTEM_UI.equals(loadedPackage)) {
             installSystemUiHooks(param.getDefaultClassLoader());
-        } else if (MIUI_HOME.equals(processName)) {
+        } else if (MIUI_HOME.equals(loadedPackage)) {
             installMiuiHomeHooks(param.getDefaultClassLoader());
         }
     }

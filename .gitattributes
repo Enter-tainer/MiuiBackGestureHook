@@ -1,0 +1,9 @@
+* text=auto
+
+# Executed by Android/Linux; CRLF breaks shebangs and shell parsing.
+gradlew text eol=lf
+*.sh text eol=lf
+*.sh.in text eol=lf
+*.S text eol=lf
+experiments/**/bin/* text eol=lf
+experiments/**/META-INF/com/google/android/* text eol=lf

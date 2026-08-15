@@ -54,6 +54,16 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected abstract void publishSystemUiReturnHomeFinish(
             Object controller, long shellSessionId,
             Object finishCallback, String reason);
+    protected abstract Object findNativeEdgeBackPlugin(
+            Object edgeBackGestureHandler) throws Exception;
+    protected abstract void prepareNativeBackPanel(
+            Object edgeBackGestureHandler, Object plugin) throws Exception;
+    protected abstract void updateNativeBackPanelDisplaySize(
+            Object edgeBackGestureHandler, Object plugin) throws Exception;
+    protected abstract boolean isNavigationOverlayExcluded(
+            Object edgeBackGestureHandler, int x, int y) throws Exception;
+    protected abstract void injectPlatformLegacyBackKey(
+            Object controller, int displayId) throws Exception;
 
     protected static boolean hasXiaomiBackIntent(
             float outwardDistance, float verticalDelta, float outwardThreshold) {
@@ -244,6 +254,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean pilfered;
         protected boolean waitingForTransientBarsAtDown;
         protected boolean arbiterAttached;
+        protected final AtomicBoolean detachStarted = new AtomicBoolean();
         protected int activeEdge;
         protected int downEventId;
         protected int downDeviceId = Integer.MIN_VALUE;
@@ -265,7 +276,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             this.inputMonitor = inputMonitor;
             this.displayId = displayId;
             this.driver = new SystemUiBackGestureDriver(context, edgeBackGestureHandler,
-                    controller, backAnimationImpl);
+                    controller, backAnimationImpl, displayId);
         }
 
         void attach() {
@@ -279,23 +290,40 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
 
         public void detach() {
-            resetCandidate();
-            driver.detach();
-            try {
-                dispose();
-            } catch (Throwable throwable) {
-                moduleLog(Log.WARN, TAG, "Failed to dispose native back input receiver", throwable);
-            }
-            try {
-                inputMonitor.dispose();
-            } catch (Throwable throwable) {
-                moduleLog(Log.WARN, TAG, "Failed to dispose native back input monitor", throwable);
+            if (!detachStarted.compareAndSet(false, true)) {
+                return;
             }
             if (arbiterAttached) {
                 arbiterAttached = false;
                 onSystemUiInputMonitorDetached(context);
             }
-            moduleLog(Log.INFO, TAG, "Native SystemUI back input receiver detached");
+            Runnable disposeOnOwner = () -> {
+                resetCandidate();
+                driver.detach();
+                try {
+                    dispose();
+                } catch (Throwable throwable) {
+                    moduleLog(Log.WARN, TAG,
+                            "Failed to dispose native back input receiver", throwable);
+                }
+                try {
+                    inputMonitor.dispose();
+                } catch (Throwable throwable) {
+                    moduleLog(Log.WARN, TAG,
+                            "Failed to dispose native back input monitor", throwable);
+                }
+                moduleLog(Log.INFO, TAG,
+                        "Native SystemUI back input receiver detached on owner Looper");
+            };
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                disposeOnOwner.run();
+            } else {
+                // InputEventReceiver enforces owner-Looper disposal on Android 17.
+                // Hot reload runs from an LSPosed Binder thread, and its later
+                // restoration is also queued to main, so FIFO ordering disposes
+                // this old receiver before a replacement monitor is attached.
+                new Handler(Looper.getMainLooper()).post(disposeOnOwner);
+            }
         }
 
         void updateBackAnimation(Object newBackAnimationImpl) throws Exception {
@@ -1125,8 +1153,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return true;
             }
             try {
-                Object bounds = readField(edgeBackGestureHandler, "mNavBarOverlayExcludedBounds");
-                if (!(bounds instanceof Rect) || ((Rect) bounds).contains(x, y)) {
+                if (isNavigationOverlayExcluded(edgeBackGestureHandler, x, y)) {
                     return true;
                 }
             } catch (Throwable throwable) {
@@ -1350,6 +1377,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected final Context context;
         protected final Object edgeBackGestureHandler;
+        protected final int displayId;
         protected volatile Object controller;
         public volatile Object backAnimationImpl;
         protected volatile Executor shellExecutor;
@@ -1390,10 +1418,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean miuiStyleHapticsActive;
 
         SystemUiBackGestureDriver(Context context, Object edgeBackGestureHandler,
-                                  Object controller, Object backAnimationImpl)
+                                  Object controller, Object backAnimationImpl,
+                                  int displayId)
                 throws Exception {
             this.context = context;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
+            this.displayId = displayId;
             this.controller = controller;
             this.backAnimationImpl = backAnimationImpl;
             this.shellExecutor = resolveShellExecutor(controller);
@@ -2157,8 +2187,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             }
 
             try {
-                invokeAnyMethod(edgeBackGestureHandler,
-                        "updateDisplaySize$1", new Object[0]);
+                Object plugin = findNativeEdgeBackPlugin(edgeBackGestureHandler);
+                updateNativeBackPanelDisplaySize(edgeBackGestureHandler, plugin);
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG,
                         "Failed to update display size before Shell start",
@@ -3493,23 +3523,15 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 moduleLegacyBackInjection.set(this);
             }
             try {
-                boolean downSent = false;
                 try {
-                    invokeAnyMethod(injectionController, "sendBackEvent",
-                            new Object[]{Integer.valueOf(KEY_ACTION_DOWN)});
-                    downSent = true;
+                    injectPlatformLegacyBackKey(injectionController, displayId);
+                    moduleLog(Log.INFO, TAG,
+                            "Injected one legacy BACK pair through stock Shell helper"
+                                    + ", displayId=" + displayId);
                 } catch (Throwable throwable) {
-                    moduleLog(Log.ERROR, TAG, "Failed to inject legacy BACK down", throwable);
-                } finally {
-                    if (downSent) {
-                        try {
-                            invokeAnyMethod(injectionController, "sendBackEvent",
-                                    new Object[]{Integer.valueOf(KEY_ACTION_UP)});
-                            moduleLog(Log.INFO, TAG, "Injected legacy back key via sendBackEvent");
-                        } catch (Throwable throwable) {
-                            moduleLog(Log.ERROR, TAG, "Failed to inject legacy BACK up", throwable);
-                        }
-                    }
+                    moduleLog(Log.ERROR, TAG,
+                            "Failed to inject legacy BACK pair through stock Shell helper",
+                            throwable);
                 }
             } finally {
                 if (previousMarker == null) {
@@ -3523,7 +3545,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean dispatchToEdgePlugin(MotionEvent event, int edge) {
             MotionEvent screenEvent = null;
             try {
-                Object plugin = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
+                Object plugin = findNativeEdgeBackPlugin(edgeBackGestureHandler);
                 if (plugin == null) {
                     moduleLog(Log.WARN, TAG, "NavigationEdgeBackPlugin is null; native panel unavailable");
                     if (miuiStyleGestureActive) {
@@ -3577,8 +3599,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected String readNativePanelState() {
             try {
-                Object plugin = readField(
-                        edgeBackGestureHandler, "mEdgeBackPlugin");
+                Object plugin = findNativeEdgeBackPlugin(edgeBackGestureHandler);
                 Object state = plugin == null ? null
                         : readField(plugin, "currentState");
                 return state instanceof Enum<?>
@@ -3616,8 +3637,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected void prepareNativeBackPanel(Object plugin) {
             try {
-                invokeAnyMethod(plugin, "updateConfiguration$1", new Object[0]);
-                invokeAnyMethod(plugin, "updateRestingArrowDimens", new Object[0]);
+                SystemUiInputRuntime.this.prepareNativeBackPanel(
+                        edgeBackGestureHandler, plugin);
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG, "Failed to prepare native AOSP back panel", throwable);
             }
@@ -3880,7 +3901,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             }
             new Handler(Looper.getMainLooper()).post(() -> {
                 try {
-                    Object plugin = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
+                    Object plugin = findNativeEdgeBackPlugin(edgeBackGestureHandler);
                     if (plugin != null) {
                         applyNativePanelSkinVisibility(plugin, false);
                         applyNativePanelHapticSuppression(plugin, false);

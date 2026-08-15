@@ -1,0 +1,386 @@
+#!/system/bin/sh
+
+set -eu
+
+MODULE_ID=miui-home-hyos-zn
+MODULE_DIR="/data/adb/modules/$MODULE_ID"
+MODULE_SO="$MODULE_DIR/lib/libmiui_home_hyos_zn.so"
+DIAGNOSTICS_MAP="$MODULE_DIR/diagnostics.map"
+HYOS_PATH=/system_ext/bin/hyos_spawner
+ZNCTL=/data/adb/modules/zygisksu/bin/zygiskd
+LOG_TAG=MiuiHomeHyosZn
+
+usage() {
+  cat >&2 <<EOF
+usage: hsctl status
+       hsctl activate --confirm
+       hsctl rollback --confirm
+       hsctl counters
+       hsctl logs [count]
+       hsctl help
+
+The Zygisk Next module enabled state is the only runtime gate. The validated
+Android 17 / MiuiHome 4371 bridge is compiled in when the module is enabled.
+activate performs one bounded hyos_spawner replacement, verifies injection,
+starts the normal Home Activity, and verifies that Launcher maps this module.
+Any activation failure immediately enters rollback. rollback disables only this
+ZN module, replaces only the exact root hyos_spawner, explicitly starts Home,
+and verifies that the recovered Launcher no longer maps this module.
+
+Package deployment is intentionally unavailable here. Use the repository host
+script safe-device-test.ps1 so a mapped ELF can never be overwritten in place.
+Neither command writes an Android property, kills MiuiHome directly, or reboots.
+EOF
+}
+
+require_root() {
+  [ "$(id -u)" = "0" ] || {
+    echo "hsctl must run as root" >&2
+    exit 1
+  }
+}
+
+require_payload() {
+  [ -x "$ZNCTL" ] || {
+    echo "Zygisk Next controller is unavailable" >&2
+    return 1
+  }
+  [ -f "$MODULE_DIR/zn_modules.txt" ] && [ -f "$MODULE_SO" ] || {
+    echo "module payload is incomplete" >&2
+    return 1
+  }
+}
+
+zn_dump() {
+  timeout -k 1 1 "$ZNCTL" dump-zn -sa
+}
+
+zn_change() {
+  timeout -k 1 5 "$ZNCTL" "$@"
+}
+
+find_hyos_pid() {
+  candidates="$(ps -A -o USER,PID,PPID 2>/dev/null |
+    awk '$1 == "root" && $3 == 1 { print $2 }')"
+  for pid in $candidates; do
+    proc="/proc/$pid"
+    executable="$(readlink "$proc/exe" 2>/dev/null || true)"
+    [ "$executable" = "$HYOS_PATH" ] || continue
+    uid="$(sed -n 's/^Uid:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      "$proc/status" 2>/dev/null || true)"
+    ppid="$(sed -n 's/^PPid:[[:space:]]*//p' \
+      "$proc/status" 2>/dev/null || true)"
+    [ "$uid" = "0" ] && [ "$ppid" = "1" ] || continue
+    printf '%s' "${proc#/proc/}"
+    return 0
+  done
+  return 1
+}
+
+find_launcher_pid() {
+  pidof com.miui.home 2>/dev/null | awk '{print $1}'
+}
+
+mapped_module_pids() {
+  spawner="$(find_hyos_pid || true)"
+  [ -n "$spawner" ] || return 0
+  candidates="$spawner $(ps -A -o PID,PPID 2>/dev/null |
+    awk -v owner="$spawner" '$2 == owner { print $1 }')"
+  for pid in $candidates; do
+    maps="/proc/$pid/maps"
+    if [ -r "$maps" ] && grep -F "$MODULE_SO" "$maps" >/dev/null 2>&1; then
+      printf '%s\n' "$pid"
+    fi
+  done
+  return 0
+}
+
+zn_module_enabled() {
+  [ -x "$ZNCTL" ] || return 1
+  zn_dump 2>/dev/null | awk -v module="$MODULE_ID" '
+    $1 == "name=" module {
+      for (i=1; i<=NF; i++) if ($i == "enabled=true") found=1
+      exit
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+zn_service_state() {
+  [ -x "$ZNCTL" ] || return 1
+  zn_dump 2>/dev/null | awk -v target="$HYOS_PATH" '
+    $1 == "path=" target && $2 ~ /^modules=/ { in_target=1; next }
+    in_target && /can_load=/ { print; exit }
+  '
+}
+
+require_activation_budget() {
+  state="$(zn_service_state || true)"
+  [ -n "$state" ] || {
+    echo "unable to read Zygisk Next service state for $HYOS_PATH" >&2
+    return 1
+  }
+  can_load="$(printf '%s\n' "$state" |
+    sed -n 's/.*can_load=\([^ ]*\).*/\1/p')"
+  death_count="$(printf '%s\n' "$state" |
+    sed -n 's/.*death_count=\([0-9][0-9]*\).*/\1/p')"
+  [ "$can_load" = "true" ] && [ -n "$death_count" ] || {
+    echo "Zygisk Next cannot inject $HYOS_PATH: $state" >&2
+    return 1
+  }
+  [ "$death_count" -lt 2 ] || {
+    echo "Zygisk Next restart budget is exhausted: $state" >&2
+    return 1
+  }
+}
+
+wait_hyos_replacement() {
+  old_pid="$1"
+  attempt=0
+  while [ "$attempt" -lt 150 ]; do
+    candidate="$(find_hyos_pid || true)"
+    if [ -n "$candidate" ] && [ "$candidate" != "$old_pid" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
+replace_spawner() {
+  old_pid="$(find_hyos_pid || true)"
+  [ -n "$old_pid" ] || {
+    echo "exact root hyos_spawner PID is unavailable" >&2
+    return 1
+  }
+  kill -TERM "$old_pid"
+  new_pid="$(wait_hyos_replacement "$old_pid" || true)"
+  [ -n "$new_pid" ] || {
+    echo "hyos_spawner did not recover within 15 seconds" >&2
+    return 1
+  }
+  echo "hyos_old_pid=$old_pid"
+  echo "hyos_new_pid=$new_pid"
+  printf '%s' "$new_pid" > "$MODULE_DIR/.last_hyos_pid"
+}
+
+wait_zn_injected() {
+  expected_pid="$1"
+  attempt=0
+  while [ "$attempt" -lt 15 ]; do
+    if zn_dump 2>/dev/null |
+        grep -F "pid=$expected_pid prog=$HYOS_PATH modules=" >/dev/null; then
+      echo "zn_injected_pid=$expected_pid"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  echo "Zygisk Next did not record injection into PID $expected_pid" >&2
+  return 1
+}
+
+start_and_verify_home() {
+  expected_parent="$1"
+  am start -W -a android.intent.action.MAIN \
+    -c android.intent.category.HOME >/dev/null 2>&1 || true
+  attempt=0
+  while [ "$attempt" -lt 200 ]; do
+    launcher_pid="$(find_launcher_pid || true)"
+    if [ -n "$launcher_pid" ]; then
+      launcher_parent="$(sed -n 's/^PPid:[[:space:]]*//p' \
+        "/proc/$launcher_pid/status" 2>/dev/null || true)"
+      if [ "$launcher_parent" = "$expected_parent" ]; then
+        echo "launcher_pid=$launcher_pid"
+        echo "launcher_parent=$launcher_parent"
+        return 0
+      fi
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  echo "normal MiuiHome Launcher did not recover under PID $expected_parent" >&2
+  return 1
+}
+
+rollback_runtime() {
+  reason="${1:-manual}"
+  require_payload || return 1
+  zn_change znmod disable "$MODULE_ID" svc
+  if zn_module_enabled; then
+    echo "failed to disable ZN module $MODULE_ID" >&2
+    return 1
+  fi
+  output="$(replace_spawner 2>&1)" || {
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$output"
+  new_pid="$(printf '%s\n' "$output" |
+    sed -n 's/^hyos_new_pid=//p' | tail -n 1)"
+  [ -n "$new_pid" ] || return 1
+  start_and_verify_home "$new_pid" || return 1
+  mapped="$(mapped_module_pids || true)"
+  [ -z "$mapped" ] || {
+    echo "rollback left module mappings in PIDs: $mapped" >&2
+    return 1
+  }
+  echo "module_enabled=0"
+  echo "module_mapped=0"
+  echo "rollback_reason=$reason"
+  echo "reinstall_required=0"
+}
+
+activate_runtime() {
+  require_payload || exit 1
+  require_activation_budget || exit 1
+  zn_change znmod enable "$MODULE_ID" svc
+  zn_change znmod reload "$MODULE_ID" svc
+  zn_module_enabled || {
+    echo "failed to enable ZN module $MODULE_ID" >&2
+    exit 1
+  }
+
+  output="$(replace_spawner 2>&1)" || {
+    printf '%s\n' "$output" >&2
+    rollback_runtime activation-spawner-failure || true
+    exit 1
+  }
+  printf '%s\n' "$output"
+  new_pid="$(printf '%s\n' "$output" |
+    sed -n 's/^hyos_new_pid=//p' | tail -n 1)"
+  wait_zn_injected "$new_pid" || {
+    rollback_runtime activation-injection-failure || true
+    exit 1
+  }
+  start_and_verify_home "$new_pid" || {
+    rollback_runtime activation-home-failure || true
+    exit 1
+  }
+  launcher_pid="$(find_launcher_pid || true)"
+  grep -F "$MODULE_SO" "/proc/$launcher_pid/maps" >/dev/null 2>&1 || {
+    echo "Launcher does not map the active module" >&2
+    rollback_runtime activation-map-failure || true
+    exit 1
+  }
+  echo "module_enabled=1"
+  echo "module_mapped=1"
+  echo "activation_state=ready-for-one-gesture"
+}
+
+show_status() {
+  echo "module_id=$MODULE_ID"
+  [ -f "$MODULE_SO" ] && echo "module_payload=present" || echo "module_payload=missing"
+  if zn_module_enabled; then
+    echo "module_enabled=1"
+  else
+    echo "module_enabled=0"
+  fi
+  hyos_pid="$(find_hyos_pid || true)"
+  echo "hyos_pid=${hyos_pid:-unavailable}"
+  launcher_pid="$(find_launcher_pid || true)"
+  echo "launcher_pid=${launcher_pid:-unavailable}"
+  if [ -n "$launcher_pid" ]; then
+    launcher_parent="$(sed -n 's/^PPid:[[:space:]]*//p' \
+      "/proc/$launcher_pid/status" 2>/dev/null || true)"
+    echo "launcher_parent=${launcher_parent:-unavailable}"
+  fi
+  mapped="$(mapped_module_pids || true)"
+  if [ -n "$mapped" ]; then
+    echo "module_mapped_pids=$(printf '%s' "$mapped" | tr '\n' ',')"
+  else
+    echo "module_mapped_pids=none"
+  fi
+  state="$(zn_service_state || true)"
+  echo "zn_hyos_service_state=${state:-unavailable}"
+}
+
+show_logs() {
+  count="${1:-120}"
+  case "$count" in
+    ''|*[!0-9]*) echo "log count must be an integer from 1 to 500" >&2; exit 2 ;;
+  esac
+  [ "$count" -ge 1 ] && [ "$count" -le 500 ] || {
+    echo "log count must be an integer from 1 to 500" >&2
+    exit 2
+  }
+  logcat -d -t "$count" -s "$LOG_TAG:I" '*:S'
+}
+
+show_counters() {
+  require_root
+  [ -f "$DIAGNOSTICS_MAP" ] || {
+    echo "diagnostics map is unavailable" >&2
+    exit 1
+  }
+  launcher_pid="$(find_launcher_pid || true)"
+  [ -n "$launcher_pid" ] || {
+    echo "MiuiHome process is unavailable" >&2
+    exit 1
+  }
+  base="$(awk -v target="$MODULE_SO" '
+    index($0, target) && $3 == "00000000" {
+      split($1, range, "-"); print range[1]; exit
+    }' "/proc/$launcher_pid/maps")"
+  [ -n "$base" ] || {
+    echo "MiuiHome does not map the active module" >&2
+    exit 1
+  }
+  while read -r name offset type; do
+    [ -n "$name" ] && [ -n "$offset" ] && [ -n "$type" ] || continue
+    type="$(printf '%s' "$type" | tr -d '\r')"
+    case "$type" in
+      u4) bytes=4 ;;
+      u8) bytes=8 ;;
+      *) echo "invalid diagnostics type for $name" >&2; exit 1 ;;
+    esac
+    address=$((0x$base + offset))
+    value="$(od -A n -t "$type" -j "$address" -N "$bytes" \
+      "/proc/$launcher_pid/mem" | tr -d ' ')"
+    [ -n "$value" ] || {
+      echo "failed to read diagnostic counter $name" >&2
+      exit 1
+    }
+    echo "$name=$value"
+  done < "$DIAGNOSTICS_MAP"
+}
+
+case "${1:-status}" in
+  status)
+    [ "$#" -le 1 ] || { usage; exit 2; }
+    show_status
+    ;;
+  activate)
+    require_root
+    [ "$#" -eq 2 ] && [ "$2" = "--confirm" ] || {
+      echo "activate requires: hsctl activate --confirm" >&2
+      exit 2
+    }
+    activate_runtime
+    ;;
+  rollback)
+    require_root
+    [ "$#" -eq 2 ] && [ "$2" = "--confirm" ] || {
+      echo "rollback requires: hsctl rollback --confirm" >&2
+      exit 2
+    }
+    rollback_runtime manual
+    ;;
+  counters)
+    [ "$#" -eq 1 ] || { usage; exit 2; }
+    show_counters
+    ;;
+  logs)
+    [ "$#" -le 2 ] || { usage; exit 2; }
+    show_logs "${2:-120}"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

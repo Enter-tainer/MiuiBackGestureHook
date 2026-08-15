@@ -3204,11 +3204,12 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             return;
         }
         try {
-            Intent stateIntent = new Intent(MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
+            Intent stateIntent = new Intent(systemUiInputArbiterStateAction());
             stateIntent.setPackage(MIUI_HOME);
             stateIntent.putExtra(EXTRA_INPUT_ARBITER_READY, ready);
             stateIntent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
                     systemUiInputArbiterGeneration);
+            stateIntent.putExtra("sender_uid", Process.myUid());
             Bundle options = BroadcastOptions.makeBasic()
                     .setShareIdentityEnabled(true)
                     .toBundle();

@@ -53,14 +53,18 @@ import io.github.libxposed.api.XposedInterface;
 
 public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
+    private volatile SystemUiPlatformImpl systemUiPlatformImpl;
+
 
     protected void installSystemUiHooks(ClassLoader classLoader) {
         try {
+            selectSystemUiPlatformImpl(classLoader);
             hookMiuiOverviewProxy(classLoader);
             hookNavigationBarTransientAutoHide(classLoader);
             hookNavigationBarTransientAppearance(classLoader);
             hookStatusBarTransientAppearance(classLoader);
             hookNavigationBarGestureInsets(classLoader);
+            hookPlatformBackAnimationStatusBarReset(classLoader);
             hookEdgeBackGestureHandler(classLoader, true, true, true);
             hookAospBackPanelHaptic(classLoader);
             hookAospBackPanelViewHaptic(classLoader);
@@ -75,6 +79,102 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG, "Failed to install SystemUI hooks", throwable);
+        }
+    }
+
+    protected void selectSystemUiPlatformImpl(ClassLoader classLoader) throws Exception {
+        Class<?> edgeHandlerClass = Class.forName(EDGE_BACK_GESTURE_HANDLER,
+                false, classLoader);
+        SystemUiPlatformImpl selected = SystemUiAndroid17Impl.matches(
+                edgeHandlerClass, classLoader)
+                ? new SystemUiAndroid17Impl() : new SystemUiAndroid16Impl();
+        SystemUiPlatformImpl previous = systemUiPlatformImpl;
+        systemUiPlatformImpl = selected;
+        if (previous != null && previous != selected) {
+            previous.destroy();
+        }
+        moduleLog(Log.INFO, TAG, "Selected SystemUI platform implementation: "
+                + selected.name());
+    }
+
+    protected SystemUiPlatformImpl requireSystemUiPlatformImpl() {
+        SystemUiPlatformImpl implementation = systemUiPlatformImpl;
+        if (implementation == null) {
+            throw new IllegalStateException("SystemUI platform implementation not selected");
+        }
+        return implementation;
+    }
+
+    protected String systemUiInputArbiterStateAction() {
+        SystemUiPlatformImpl implementation = systemUiPlatformImpl;
+        return implementation == null
+                ? MODULE_SYSTEMUI_INPUT_ARBITER_STATE
+                : implementation.systemUiInputArbiterStateAction(
+                        MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
+    }
+
+    protected void hookPlatformBackAnimationStatusBarReset(ClassLoader classLoader) {
+        try {
+            Method reset = requireSystemUiPlatformImpl()
+                    .brokenBackAnimationStatusBarResetMethod(classLoader);
+            if (reset == null) {
+                return;
+            }
+            recordHookHandle(hook(reset)
+                    .setId("systemui_a17_back_background_status_reset")
+                    .intercept(this::neutralizeBrokenBackAnimationStatusBarReset));
+            moduleLog(Log.INFO, TAG,
+                    "Neutralized stripped Android 17 BackAnimationBackground status reset");
+        } catch (Throwable throwable) {
+            moduleLog(Log.ERROR, TAG,
+                    "Failed to hook Android 17 BackAnimationBackground status reset",
+                    throwable);
+        }
+    }
+
+    protected Object neutralizeBrokenBackAnimationStatusBarReset(
+            XposedInterface.Chain chain) {
+        // Xiaomi's companion customize/set methods are no-ops, so there is no active
+        // customization to reset. Preserve the app-requested status-bar appearance.
+        return null;
+    }
+
+    @Override
+    protected Object findNativeEdgeBackPlugin(Object edgeBackGestureHandler) throws Exception {
+        return requireSystemUiPlatformImpl().findNativeEdgeBackPlugin(edgeBackGestureHandler);
+    }
+
+    @Override
+    protected void prepareNativeBackPanel(Object edgeBackGestureHandler,
+                                          Object plugin) throws Exception {
+        requireSystemUiPlatformImpl().prepareNativeBackPanel(
+                edgeBackGestureHandler, plugin);
+    }
+
+    @Override
+    protected void updateNativeBackPanelDisplaySize(Object edgeBackGestureHandler,
+                                                    Object plugin) throws Exception {
+        requireSystemUiPlatformImpl().updateDisplaySize(
+                edgeBackGestureHandler, plugin);
+    }
+
+    @Override
+    protected boolean isNavigationOverlayExcluded(Object edgeBackGestureHandler,
+                                                   int x, int y) throws Exception {
+        return requireSystemUiPlatformImpl().isNavigationOverlayExcluded(
+                edgeBackGestureHandler, x, y);
+    }
+
+    @Override
+    protected void injectPlatformLegacyBackKey(
+            Object controller, int displayId) throws Exception {
+        requireSystemUiPlatformImpl().injectLegacyBackKey(controller, displayId);
+    }
+
+    protected void destroySystemUiPlatformImpl() {
+        SystemUiPlatformImpl implementation = systemUiPlatformImpl;
+        if (implementation != null) {
+            implementation.destroy();
         }
     }
 
@@ -376,11 +476,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
     protected void hookBackAnimationSendBackEvent(ClassLoader classLoader) {
         try {
-            Class<?> controllerClass = Class.forName(BACK_ANIMATION_CONTROLLER, false,
-                    classLoader);
-            Method sendBackEvent = controllerClass.getDeclaredMethod("sendBackEvent",
-                    int.class);
-            sendBackEvent.setAccessible(true);
+            Method sendBackEvent = requireSystemUiPlatformImpl()
+                    .backEventGuardMethod(classLoader);
             recordHookHandle(hook(sendBackEvent)
                     .setId("systemui_back_send_event_guard")
                     .intercept(this::guardDuplicateBackEvent));
@@ -604,6 +701,31 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Object navigationBar = chain.getThisObject();
             Object edgeBackGestureHandler = readField(
                     navigationBar, "mEdgeBackGestureHandler");
+            InsetsFrameProvider.InsetsSizeOverride imeOverride =
+                    new InsetsFrameProvider.InsetsSizeOverride(
+                            WindowManager.LayoutParams.TYPE_INPUT_METHOD, Insets.NONE);
+            InsetsFrameProvider.InsetsSizeOverride[] imeOverrides =
+                    new InsetsFrameProvider.InsetsSizeOverride[]{imeOverride};
+            Object providers = readField(result, "providedInsets");
+            if (providers == null || !providers.getClass().isArray()) {
+                return result;
+            }
+            int systemGestureType = WindowInsets.Type.systemGestures();
+            boolean stableOverrideTypes = requireSystemUiPlatformImpl()
+                    .requiresStableGestureInsetsOverrideTypes();
+            if (stableOverrideTypes) {
+                for (int i = 0; i < Array.getLength(providers); i++) {
+                    Object provider = Array.get(providers, i);
+                    if (!(provider instanceof InsetsFrameProvider)
+                            || ((InsetsFrameProvider) provider).getType()
+                            != systemGestureType) {
+                        continue;
+                    }
+                    InsetsFrameProvider typedProvider = (InsetsFrameProvider) provider;
+                    typedProvider.setInsetsSizeOverrides(imeOverrides);
+                    typedProvider.setMinimalInsetsSizeInDisplayCutoutSafe(Insets.NONE);
+                }
+            }
             if (!Boolean.TRUE.equals(readField(edgeBackGestureHandler, "mInGestureNavMode"))
                     || !Boolean.TRUE.equals(readField(
                     edgeBackGestureHandler, "mIsBackGestureAllowed"))) {
@@ -613,18 +735,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Context context = (Context) readField(navigationBar, "mContext");
             EdgeWidthSnapshot widths = readEdgeWidthSnapshot(edgeBackGestureHandler,
                     context.getResources().getDisplayMetrics().density);
-            InsetsFrameProvider.InsetsSizeOverride imeOverride =
-                    new InsetsFrameProvider.InsetsSizeOverride(
-                            WindowManager.LayoutParams.TYPE_INPUT_METHOD, Insets.NONE);
-            InsetsFrameProvider.InsetsSizeOverride[] imeOverrides =
-                    new InsetsFrameProvider.InsetsSizeOverride[]{imeOverride};
-
-            Object providers = readField(result, "providedInsets");
-            if (providers == null || !providers.getClass().isArray()) {
-                return result;
-            }
             int restored = 0;
-            int systemGestureType = WindowInsets.Type.systemGestures();
             for (int i = 0; i < Array.getLength(providers); i++) {
                 Object provider = Array.get(providers, i);
                 if (!(provider instanceof InsetsFrameProvider)
@@ -642,8 +753,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     continue;
                 }
                 // WMS also applies the cutout-safe minimum to overridden frames, so keep it zero.
-                typedProvider.setInsetsSizeOverrides(imeOverrides);
-                typedProvider.setMinimalInsetsSizeInDisplayCutoutSafe(Insets.NONE);
+                if (!stableOverrideTypes) {
+                    typedProvider.setInsetsSizeOverrides(imeOverrides);
+                    typedProvider.setMinimalInsetsSizeInDisplayCutoutSafe(Insets.NONE);
+                }
                 typedProvider.setInsetsSize(size);
                 restored++;
             }
@@ -914,10 +1027,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             boolean hasNativeOwner = defaultNavigationBar != null || taskbarInitialized;
             boolean systemHasNavigationBar = false;
             if (displayId == 0) {
-                Object result = invokeAnyMethod(controller,
-                        "shouldCreateNavBarAndTaskBar",
-                        new Object[]{Integer.valueOf(displayId)});
-                systemHasNavigationBar = Boolean.TRUE.equals(result);
+                systemHasNavigationBar = requireSystemUiPlatformImpl()
+                        .canCreateNavBarOrTaskBar(controller, displayId);
             }
             boolean headlessDesired = displayId == 0
                     && fsgMode
@@ -1085,7 +1196,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         Method removeUpdater = navBarHelper.getClass().getMethod(
                 "removeNavTaskStateUpdater", updaterInterface);
         Method setBackAnimation = edgeBackGestureHandler.getClass().getMethod(
-                "setBackAnimation", backAnimation.getClass());
+                "setBackAnimation", requireSystemUiPlatformImpl()
+                        .backAnimationParameterClass(classLoader));
         navigationModeChanged.setAccessible(true);
         registerUpdater.setAccessible(true);
         removeUpdater.setAccessible(true);
@@ -1475,8 +1587,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         if (hookSetBackAnimation) {
             try {
                 Method setBackAnimation = handlerClass.getDeclaredMethod("setBackAnimation",
-                        Class.forName(BACK_ANIMATION_CONTROLLER + "$BackAnimationImpl",
-                                false, classLoader));
+                        requireSystemUiPlatformImpl()
+                                .backAnimationParameterClass(classLoader));
                 setBackAnimation.setAccessible(true);
                 recordHookHandle(hook(setBackAnimation)
                         .setId("systemui_edge_back_setBackAnimation")
@@ -1765,17 +1877,29 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         Object apps = null;
         Object token = null;
         Object finishedCallback = null;
+        int navigationType = -1;
         try {
             controller = readField(chain.getThisObject(), "this$0");
             apps = chain.getArg(0);
             token = chain.getArg(1);
             finishedCallback = chain.getArg(2);
+            Object navigation = readFieldOrNull(controller, "mBackNavigationInfo");
+            if (navigation instanceof BackNavigationInfo) {
+                navigationType = ((BackNavigationInfo) navigation).getType();
+            }
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG,
                     "Failed to capture prepared-back target arrival",
                     throwable);
         }
         Object result = chain.proceed();
+        if (navigationType == TYPE_CROSS_TASK) {
+            moduleLog(Log.INFO, TAG, "Cross-task remote targets arrived"
+                    + ", token=" + shortObject(token)
+                    + ", apps=" + describeRemoteAnimationTargets(apps)
+                    + ", finishedCallback=" + shortObject(finishedCallback));
+            logCrossTaskTargetDiagnostics();
+        }
         if (controller != null && token != null) {
             PreparedBackTargetArrival arrival = new PreparedBackTargetArrival(
                     controller, token, apps, finishedCallback);
@@ -2383,9 +2507,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Class<?> backgroundClass = Class.forName(
                     BACK_ANIMATION_BACKGROUND, false, classLoader);
+            int expectedParameterCount = requireSystemUiPlatformImpl()
+                    .backAnimationBackgroundEnsureParameterCount();
             for (Method method : backgroundClass.getDeclaredMethods()) {
                 if ("ensureBackground".equals(method.getName())
-                        && method.getParameterCount() == 6) {
+                        && method.getParameterCount() == expectedParameterCount) {
                     method.setAccessible(true);
                     recordHookHandle(hook(method)
                             .setId("systemui_cross_task_background")
@@ -2413,8 +2539,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         int color = colorArg instanceof Number ? ((Number) colorArg).intValue() : 0;
         Object result = chain.proceed();
         try {
-            if (color != CROSS_TASK_BACKGROUND_COLOR
-                    || !isHyperOsSlideAnimationEnabled()) {
+            if (color != CROSS_TASK_BACKGROUND_COLOR) {
+                return result;
+            }
+            logCrossTaskTargetDiagnostics();
+            if (!isHyperOsSlideAnimationEnabled()) {
                 return result;
             }
             Object surface = readFieldOrNull(
@@ -2432,6 +2561,60 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             moduleLog(Log.WARN, TAG, "Failed to tint cross-task background black", throwable);
         }
         return result;
+    }
+
+    protected String describeRemoteAnimationTargets(Object targets) {
+        if (targets == null || !targets.getClass().isArray()) {
+            return shortObject(targets);
+        }
+        int count = java.lang.reflect.Array.getLength(targets);
+        StringBuilder description = new StringBuilder("[");
+        for (int index = 0; index < count; index++) {
+            if (index > 0) {
+                description.append(", ");
+            }
+            description.append(describeRemoteAnimationTarget(
+                    java.lang.reflect.Array.get(targets, index)));
+        }
+        return description.append(']').toString();
+    }
+
+    /**
+     * Records the exact targets owned by Shell's native cross-task animation at the point
+     * where it creates its background. This is deliberately read-only: compositor alpha
+     * must not be corrected until the faulty leash and frame are proven on-device.
+     */
+    protected void logCrossTaskTargetDiagnostics() {
+        Object animation = aospCrossTaskAnimation;
+        if (animation == null) {
+            moduleLog(Log.WARN, TAG, "Cross-task diagnostic missing registry animation");
+            return;
+        }
+        Object closingTarget = readFieldOrNull(animation, "mClosingTarget");
+        Object enteringTarget = readFieldOrNull(animation, "mEnteringTarget");
+        moduleLog(Log.INFO, TAG, "Cross-task exact targets"
+                + ", animation=" + shortObject(animation)
+                + ", closing=" + describeRemoteAnimationTarget(closingTarget)
+                + ", entering=" + describeRemoteAnimationTarget(enteringTarget)
+                + ", closingRect="
+                + shortObject(readFieldOrNull(animation, "mClosingCurrentRect"))
+                + ", enteringRect="
+                + shortObject(readFieldOrNull(animation, "mEnteringCurrentRect")));
+    }
+
+    protected String describeRemoteAnimationTarget(Object target) {
+        if (target == null || target instanceof String) {
+            return shortObject(target);
+        }
+        return "{identity=" + shortObject(target)
+                + ", taskId=" + readIntFieldOrDefault(target, "taskId", -1)
+                + ", mode=" + readIntFieldOrDefault(target, "mode", -1)
+                + ", leash=" + shortObject(readFieldOrNull(target, "leash"))
+                + ", localBounds=" + shortObject(readFieldOrNull(target, "localBounds"))
+                + ", screenBounds="
+                + shortObject(readFieldOrNull(target, "screenSpaceBounds"))
+                + ", translucent=" + shortObject(readFieldOrNull(target, "isTranslucent"))
+                + "}";
     }
 
     // finishAnimation() is the animation's natural end; clear the session flag so a
@@ -5262,19 +5445,12 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             return;
         }
         try {
-            Object existing = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
-            if (existing != null && isNativePluginAttached(existing)) {
-                return;
-            }
-        } catch (Throwable ignored) {
-        }
-        try {
-            Object plugin = createNativeEdgeBackPluginFromFactory(edgeBackGestureHandler, context);
+            Object plugin = requireSystemUiPlatformImpl().ensureNativeEdgeBackPlugin(
+                    edgeBackGestureHandler, context);
             if (plugin != null) {
-                invokeAnyMethod(edgeBackGestureHandler, "setEdgeBackPlugin",
-                        new Object[]{plugin});
                 moduleLog(Log.INFO, TAG, "Installed native AOSP NavigationEdgeBackPlugin: "
-                        + shortObject(plugin));
+                        + shortObject(plugin) + ", impl="
+                        + requireSystemUiPlatformImpl().name());
                 return;
             }
         } catch (Throwable throwable) {

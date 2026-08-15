@@ -4,11 +4,50 @@
 
 This repository is an LSPosed module for researching Xiaomi/MIUI back gesture behavior.
 
+## Device Mutation Constraint
+
+- Never write Android system properties during development or recovery. Do not
+  execute `setprop`, and do not invoke any helper command whose implementation
+  writes a property, even when it would write the value already present.
+- Do not rely on a native child process reading `/data/adb/modules`: the
+  `hyos_spawner`/MiuiHome SELinux domains cannot use module-local marker files
+  as in-process gates. The Zygisk Next module enabled state is the sole runtime
+  enable/disable control; validated 4371 business/bridge hooks are compile-time
+  parts of that module, and the rejected native-receiver experiment stays
+  compile-time disabled. The controller remains inside the module directory
+  and must not install an executable under `/system/bin`.
+- Never overwrite or truncate the active native module file while any process
+  maps it. Stage an update at a distinct path/inode, stop or replace the exact
+  owning spawner through the approved no-property workflow, and only then make
+  the staged file active. An in-place `cp` over a mapped ELF is forbidden.
+- Every live `miui-home-hyos-zn` update, activation, evidence capture, and
+  rollback must use
+  `experiments/miui-home-hyos-zn/safe-device-test.ps1`. Do not deploy this
+  experiment with a direct `ksud module install`, direct `adb push` into the
+  active module, a hand-written `zygiskd` sequence, or ad-hoc process signals.
+  The script must verify exact MiuiHome version 4371, one immutable package
+  SHA-256, a distinct staged inode and matching native hash, the exact root
+  PPID-1 spawner, absence of old mappings before activation, ZN injection, the
+  normal Launcher parent/mapping, and no new activation tombstone. Any failed
+  invariant must disable only this ZN module and restore a clean spawner/Home.
+- A formal native handoff test is one activation followed by exactly one fresh
+  side gesture and one evidence capture. If a build cannot obtain arbiter
+  readiness until MiuiHome first reaches its processor, label one separate
+  gesture as a readiness warmup, capture it independently, and only then
+  perform exactly one formal gesture. Never count the warmup as handoff
+  evidence. Count the formal gesture as successful only when the same
+  captured session proves native accepted-DOWN publication, SystemUI's exact
+  matching acceptance and pilfer, and Shell navigation start. Gesture visuals,
+  query/reply success, or a native hook counter alone are not takeover proof.
+
 Current workspace:
 
 ```text
 repository root (use the current working directory)
 ```
+
+For iterative on-device tests, build and install `:app:assembleDebug`; use a release build only
+for a final delivery candidate. Preserve the API-102 hot-reload verification after installation.
 
 Previous jadx workspace:
 
@@ -247,6 +286,13 @@ Remote-animation rules:
   animation code.
 - Restore cross-activity and cross-task registry entries only from non-null backing Xiaomi
   Shell animation objects; do not replace missing objects with hand-written surface code.
+- On Android 17 / MiuiHome 4371, normalize only the exact standard fullscreen two-Task
+  predictive prepared shape whose native closing and opening adaptors, immutable Task identity,
+  observed ChangeInfo/TransitionInfo flags, bounds, display, leash ownership, and absolute layers
+  all match. Xiaomi emits both changes as `TO_FRONT`; change only the already-front closing Task
+  to `CHANGE`, preserve the opening Task as `TO_FRONT`, and restate the two native predictive
+  leash layers in the existing start transaction. Do not swap targets, transform either leash,
+  or apply this rule to freeform, return-to-home, cross-activity, or ambiguous shapes.
 - For prepared remote animations, mark the tracker finished and call or wait for
   `startPostCommitAnimation()` so the runner receives cancel/invoke before navigation
   cleanup. Do not finish an active prepared animation directly from the overlay.
@@ -533,7 +579,8 @@ commit: 99b01a65cc4c104933788b3143285ab6bae65827
 
 Discover a suitable local checkout instead of hard-coding a machine-specific path. If it
 is unavailable, fetch only the exact tag/projects/files needed. Checked-in reference
-snippets are under `refs/aosp_back/shell/` and `refs/aosp_back/systemui/`; do not assume the
+snippets are under `refs/android16/aosp_back_16/shell/` and
+`refs/android16/aosp_back_16/systemui/`; do not assume the
 controller snippet is an exact r1 copy.
 
 The current implementation is AOSP-aligned but is not a completely stock AOSP input
@@ -627,6 +674,24 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
   `proceed()`.
 
 ## Development Guidelines
+
+## MiuiHome Native Crash Recovery
+
+- If a native MiuiHome experiment crashes into a loop, first fail closed through
+  the approved rollback script: disable the ZN module, restart only the exact
+  `hyos_spawner`, and explicitly start Home. Never clear or write RescueParty
+  properties, and do not clear launcher application data.
+- Once the crash loop has stopped and `SafeLauncher` is stable, explicitly ask the user
+  to reinstall the exact approved MiuiHome 4371 package once. Do not repeatedly send
+  `exit_safeMode`, repeatedly start `.launcher.Launcher`, or assume those actions can
+  clear this build's persisted SafeLauncher selection.
+- Do not reinstall MiuiHome on the user's behalf unless they explicitly request it.
+  A missing Launcher immediately after a clean spawner replacement must first be
+  recovered with one explicit standard HOME Activity start. Ask the user to
+  reinstall exact approved 4371 once only if rollback plus that start still
+  leaves persistent SafeLauncher/crash-loop state. After completion, verify
+  version 4371, the normal Launcher component, absence of a continuing native
+  crash loop, and the disabled ZN gate before any further test.
 
 - Prefer Java for hook/runtime code; keep the existing Kotlin/Compose application UI in Kotlin.
 - Use the modern LSPosed/libxposed API already declared by the project.

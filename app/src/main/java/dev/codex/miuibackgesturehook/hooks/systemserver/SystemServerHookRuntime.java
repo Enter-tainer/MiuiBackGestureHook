@@ -38,6 +38,8 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     protected static final int SERVER_FREEFORM_PREPARED_OPENING_FLAGS =
             FLAG_BACK_GESTURE_ANIMATED | FLAG_FILLS_TASK | FLAG_IS_OCCLUDED;
     protected volatile Field serverTransitionChangeInfoFlagsField;
+    private volatile SystemServerPlatformImpl systemServerPlatformImpl;
+    private volatile ClassLoader systemServerPlatformClassLoader;
 
     protected void installSystemServerHooks(ClassLoader classLoader) {
         try {
@@ -47,15 +49,29 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         + BACK_NAVIGATION_CONTROLLER);
                 return;
             }
+            try {
+                selectSystemServerPlatformImpl(serverClassLoader);
+            } catch (Throwable throwable) {
+                moduleLog(Log.ERROR, TAG,
+                        "Failed to select system_server platform implementation;"
+                                + " version-specific predictive-back hooks stay disabled",
+                        throwable);
+            }
             hookBackNavigationDoneCleanup(serverClassLoader);
             hookPredictiveBackOptInMetadata(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
             hookBackWindowStartAnimation(serverClassLoader);
-            hookFreeformCrossActivityPrepareRole(serverClassLoader);
-            hookScheduleAnimationPrepareTransition(serverClassLoader);
+            hookA17OpeningSurfaceVisibility(serverClassLoader);
+            if (systemServerPlatformImpl != null) {
+                hookFreeformCrossActivityPrepareRole(serverClassLoader);
+                hookScheduleAnimationPrepareTransition(serverClassLoader);
+            }
             hookReturnHomeTouchOcclusion(serverClassLoader);
             moduleLog(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
-                    + BUILD_MARK + ", hooks=" + hookHandles.size());
+                    + BUILD_MARK
+                    + ", platform=" + (systemServerPlatformImpl == null
+                    ? "unresolved" : systemServerPlatformImpl.name())
+                    + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG, "Failed to install system_server hooks", throwable);
         }
@@ -370,6 +386,43 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         return null;
     }
 
+    protected synchronized void selectSystemServerPlatformImpl(ClassLoader classLoader)
+            throws Exception {
+        if (classLoader == null) {
+            throw new ClassNotFoundException("system_server ClassLoader is null");
+        }
+        SystemServerPlatformImpl current = systemServerPlatformImpl;
+        if (current != null && systemServerPlatformClassLoader == classLoader) {
+            return;
+        }
+        Class<?> transitionClass = Class.forName(
+                "com.android.server.wm.Transition", false, classLoader);
+        SystemServerPlatformImpl selected;
+        if (SystemServerAndroid17Impl.matches(transitionClass)) {
+            selected = new SystemServerAndroid17Impl();
+        } else if (SystemServerAndroid16Impl.matches(transitionClass)) {
+            selected = new SystemServerAndroid16Impl();
+        } else {
+            throw new NoSuchMethodException(
+                    "Unsupported Transition.calculateTransitionInfo platform shape");
+        }
+        systemServerPlatformImpl = selected;
+        systemServerPlatformClassLoader = classLoader;
+        moduleLog(Log.INFO, TAG, "Selected system_server platform implementation="
+                + selected.name() + ", classLoader=" + classLoader);
+    }
+
+    protected SystemServerPlatformImpl requireSystemServerPlatformImpl(
+            ClassLoader classLoader) throws Exception {
+        selectSystemServerPlatformImpl(classLoader);
+        SystemServerPlatformImpl implementation = systemServerPlatformImpl;
+        if (implementation == null) {
+            throw new IllegalStateException(
+                    "system_server platform implementation is unavailable");
+        }
+        return implementation;
+    }
+
     protected void hookBackNavigationDoneCleanup(ClassLoader classLoader) {
         try {
             Class<?> controllerClass = Class.forName(BACK_NAVIGATION_CONTROLLER, false,
@@ -470,6 +523,27 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         }
     }
 
+    protected void hookA17OpeningSurfaceVisibility(ClassLoader classLoader) {
+        try {
+            SystemServerPlatformImpl implementation =
+                    requireSystemServerPlatformImpl(classLoader);
+            Method method = implementation.openingSurfaceVisibilityMethod(classLoader);
+            if (method == null) {
+                return;
+            }
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("server_a17_opening_surface_visibility")
+                    .intercept(this::restoreA17OpeningSurfaceVisibility));
+            moduleLog(Log.INFO, TAG,
+                    "Hooked Android 17 opening-surface visibility recovery");
+        } catch (Throwable throwable) {
+            moduleLog(Log.ERROR, TAG,
+                    "Failed to hook Android 17 opening-surface visibility recovery",
+                    throwable);
+        }
+    }
+
     protected void hookFreeformCrossActivityPrepareRole(ClassLoader classLoader) {
         serverTransitionChangeInfoFlagsField = null;
         try {
@@ -478,27 +552,16 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             if (!initializeFreeformPrepareRoleReflection(classLoader)) {
                 return;
             }
-            for (Method method : transitionClass.getDeclaredMethods()) {
-                Class<?>[] parameters = method.getParameterTypes();
-                if ("calculateTransitionInfo".equals(method.getName())
-                        && parameters.length == 5
-                        && parameters[0] == int.class
-                        && parameters[1] == int.class
-                        && "java.util.ArrayList".equals(parameters[2].getName())
-                        && parameters[3] == SurfaceControl.Transaction.class
-                        && parameters[4] == int.class) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("server_freeform_prepare_role_normalization")
-                            .intercept(this::normalizeFreeformCrossActivityTransitionInfo));
-                    moduleLog(Log.INFO, TAG,
-                            "Hooked server cross-activity predictive-back prepare role"
-                                    + " normalization");
-                    return;
-                }
-            }
-            moduleLog(Log.WARN, TAG,
-                    "Transition.calculateTransitionInfo five-argument overload not found");
+            SystemServerPlatformImpl implementation =
+                    requireSystemServerPlatformImpl(classLoader);
+            Method method = implementation.calculateTransitionInfoMethod(transitionClass);
+            recordHookHandle(hook(method)
+                    .setId("server_freeform_prepare_role_normalization")
+                    .intercept(this::normalizeFreeformCrossActivityTransitionInfo));
+            moduleLog(Log.INFO, TAG,
+                    "Hooked server cross-activity predictive-back prepare role"
+                            + " normalization, platform=" + implementation.name()
+                            + ", parameterCount=" + method.getParameterCount());
         } catch (Throwable throwable) {
             serverTransitionChangeInfoFlagsField = null;
             moduleLog(Log.ERROR, TAG,
@@ -551,6 +614,17 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     throwable);
         }
         Object result = chain.proceed();
+        try {
+            SystemServerPlatformImpl implementation = systemServerPlatformImpl;
+            if (implementation != null) {
+                implementation.inspectCalculatedPredictiveTransition(
+                        this, chain, result);
+            }
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed platform-specific predictive transition inspection",
+                    throwable);
+        }
         if (closingChangeInfo == null || openingChangeInfo == null
                 || closingIndex < 0) {
             return result;
@@ -888,6 +962,11 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     protected Object prepareOpeningTaskFragment(XposedInterface.Chain chain) throws Throwable {
         Object adaptor = chain.getThisObject();
         try {
+            SystemServerPlatformImpl implementation = systemServerPlatformImpl;
+            if (implementation != null
+                    && !implementation.shouldForceOpeningTaskFragmentAtAnimationStart()) {
+                return chain.proceed();
+            }
             Object target = readField(adaptor, "mTarget");
             Object isOpen = readField(adaptor, "mIsOpen");
             Object transaction = chain.getArg(1);
@@ -898,6 +977,22 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             moduleLog(Log.WARN, TAG, "Failed to prepare opening TaskFragment", throwable);
         }
         return chain.proceed();
+    }
+
+    protected Object restoreA17OpeningSurfaceVisibility(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        try {
+            ClassLoader loader = chain.getExecutable().getDeclaringClass().getClassLoader();
+            requireSystemServerPlatformImpl(loader)
+                    .restoreOpeningSurfaceVisibility(this, chain);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed Android 17 opening-surface visibility recovery;"
+                            + " preserving native preview",
+                    throwable);
+        }
+        return result;
     }
 
     protected void ensureOpenTaskFragmentVisible(Object target, SurfaceControl.Transaction transaction) {
@@ -943,55 +1038,57 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     protected Object interceptScheduleAnimationPrepareTransition(XposedInterface.Chain chain)
             throws Throwable {
         ClassLoader loader = chain.getExecutable().getDeclaringClass().getClassLoader();
-        Object builder = chain.getThisObject();
-        Object launchBehind = readFieldOrNull(builder, "mIsLaunchBehind");
-        boolean launchBehindKnown = launchBehind instanceof Boolean;
-        boolean returnToHome = Boolean.TRUE.equals(launchBehind);
-        boolean unify = readWindowFlag("unifyBackNavigationTransition", loader, false);
-        if (unify && launchBehindKnown && !returnToHome) {
-            boolean exactCrossActivity;
-            try {
-                exactCrossActivity = isExactFreeformCrossActivityPrepare(chain, builder);
-            } catch (Throwable throwable) {
-                moduleLog(Log.WARN, TAG, "Failed to inspect cross-activity prepare;"
-                        + " preserving the platform transition", throwable);
-                return chain.proceed();
-            }
-            if (exactCrossActivity) {
-                Object close = chain.getArg(1);
-                Object[] open = (Object[]) chain.getArg(2);
-                moduleLog(Log.INFO, TAG, "Allowing native unified prepare for exact"
-                        + " cross-activity, close=" + shortObject(close)
-                        + ", open=" + shortObject(open[0]));
-                Object transition = chain.proceed();
-                moduleLog(Log.INFO, TAG, "Native cross-activity prepare completed"
-                        + ", transition=" + shortObject(transition));
-                return transition;
-            }
-            moduleLog(Log.INFO, TAG, "Skipped ScheduleAnimationBuilder.prepareTransitionIfNeeded"
-                    + " to avoid Xiaomi unified-transition leash reparenting"
-                    + ", unifyBackNavigationTransition=true"
-                    + ", returnToHome=false"
-                    + ", launchBehind=" + launchBehind
-                    + ", builder=" + shortObject(builder));
-            return null;
-        }
-        if (!launchBehindKnown) {
-            moduleLog(Log.WARN, TAG, "Unable to identify ScheduleAnimationBuilder back type;"
-                    + " preserving the platform transition"
-                    + ", launchBehind=" + launchBehind
-                    + ", builder=" + shortObject(builder));
-        }
-        moduleLog(Log.INFO, TAG, "Allowing ScheduleAnimationBuilder.prepareTransitionIfNeeded"
-                + ", unifyBackNavigationTransition=" + unify
-                + ", returnToHome=" + (launchBehindKnown
-                    ? Boolean.toString(returnToHome)
-                    : "unknown")
-                + ", launchBehind=" + launchBehind
-                + ", path=" + (unify
-                    ? "unified-prepared-transition"
-                    : "Xiaomi/AOSP-setLaunchBehind"));
-        return chain.proceed();
+        return requireSystemServerPlatformImpl(loader)
+                .interceptScheduleAnimationPrepareTransition(this, chain);
+    }
+
+    final Object readSystemServerPlatformFieldOrNull(Object target, String name) {
+        return readFieldOrNull(target, name);
+    }
+
+    final void writeSystemServerPlatformField(Object target, String name, Object value)
+            throws Exception {
+        writeField(target, name, value);
+    }
+
+    final Object invokeSystemServerPlatformMethod(Object target, String name,
+                                                  Object... args) throws Exception {
+        return invokeAnyMethod(target, name, args);
+    }
+
+    final Object readSystemServerPlatformTransitionChanges(Object info) {
+        return readTransitionInfoChanges(info);
+    }
+
+    final Integer readSystemServerPlatformTransitionChangeMode(Object change) {
+        return readTransitionChangeMode(change);
+    }
+
+    final Integer readSystemServerPlatformTransitionChangeFlags(Object change) {
+        return readTransitionChangeFlags(change);
+    }
+
+    final boolean setSystemServerPlatformTransitionChangeMode(Object change, int mode) {
+        return setTransitionChangeMode(change, mode);
+    }
+
+    final boolean readSystemServerPlatformWindowFlag(String methodName,
+                                                     ClassLoader preferredLoader,
+                                                     boolean fallback) {
+        return readWindowFlag(methodName, preferredLoader, fallback);
+    }
+
+    final String describeSystemServerPlatformObject(Object value) {
+        return shortObject(value);
+    }
+
+    final void logSystemServerPlatform(int priority, String message) {
+        moduleLog(priority, TAG, message);
+    }
+
+    final void logSystemServerPlatform(int priority, String message,
+                                       Throwable throwable) {
+        moduleLog(priority, TAG, message, throwable);
     }
 
     protected boolean isExactFreeformCrossActivityPrepare(

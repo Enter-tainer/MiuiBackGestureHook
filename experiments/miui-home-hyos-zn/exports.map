@@ -1,0 +1,6 @@
+MIUI_HOME_HYOS_ZN_1.0 {
+    global:
+        zn_module;
+    local:
+        *;
+};

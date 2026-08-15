@@ -458,6 +458,9 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile long miuiHomeOpenBreakGeneration;
     protected volatile Object miuiHomeOpenBreakStateManager;
     protected volatile Object miuiHomeOpenBreakAnimationIdentity;
+    // The exact native Shell cross-task animation object sourced from the registry.
+    // Diagnostic hooks use this identity instead of guessing from color or call stacks.
+    protected volatile Object aospCrossTaskAnimation;
     protected volatile boolean miuiHomeOpenBreakGenerationPrepared;
     protected volatile boolean miuiHomeOpenBreakAnimationActive;
     protected Context miuiHomeOpenBreakContext;
@@ -1123,19 +1126,6 @@ public abstract class HookRuntimeCore extends XposedModule {
         return false;
     }
 
-    protected Object createNativeEdgeBackPluginFromFactory(Object edgeBackGestureHandler,
-                                                           Context context) throws Exception {
-        Object factory = readField(
-                edgeBackGestureHandler, "mBackPanelControllerFactory");
-        Handler handler = (Handler) readField(
-                readField(edgeBackGestureHandler, "mUiThreadContext"), "handler");
-        Object plugin = invokeMethod(factory, "create",
-                new Class<?>[]{Context.class, Handler.class},
-                new Object[]{context, handler});
-        invokeAnyMethod(plugin, "init", new Object[0]);
-        return plugin;
-    }
-
     protected void logNativePluginDiagnostics(Object edgeBackGestureHandler) {
         if (nativePluginDiagnosticsLogged) {
             return;
@@ -1154,6 +1144,9 @@ public abstract class HookRuntimeCore extends XposedModule {
             Object definitions = readField(registry, "mAnimationDefinition");
             Object defaultCrossActivity = readField(registry, "mDefaultCrossActivityAnimation");
             Object crossTask = readField(registry, "mCrossTaskAnimation");
+            if (crossTask != null) {
+                aospCrossTaskAnimation = crossTask;
+            }
             // Cross-task keeps its own native animation: the cross-activity slide
             // mishandles its differently shaped close transition.
             changed |= ensureRegistryRunner(definitions, TYPE_CROSS_ACTIVITY,

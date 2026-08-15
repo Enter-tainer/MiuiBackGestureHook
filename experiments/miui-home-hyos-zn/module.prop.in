@@ -1,0 +1,6 @@
+id=@MODULE_ID@
+name=@MODULE_NAME@
+version=@VERSION_NAME@
+versionCode=@VERSION_CODE@
+author=Codex Xiaomi launcher research
+description=Android 17 MiuiHome 4371 native handoff experiment; Zygisk Next state is the sole gate

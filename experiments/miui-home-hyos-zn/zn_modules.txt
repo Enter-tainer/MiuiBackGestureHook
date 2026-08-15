@@ -1,0 +1,1 @@
+path=/system_ext/bin/hyos_spawner lib/libmiui_home_hyos_zn.so

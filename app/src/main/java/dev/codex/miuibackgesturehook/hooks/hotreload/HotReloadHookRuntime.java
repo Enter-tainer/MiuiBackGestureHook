@@ -20,6 +20,15 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
 
     @Override
     public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        if (blockMiuiHomeXposedHooks() && isMiuiHomeProcess(processName)) {
+            // A protected Android 17 launcher process owns no module lifecycle state. Keep the
+            // reload path just as inert as cold package loading.
+            param.setSavedInstanceState(null);
+            moduleLog(Log.WARN, TAG,
+                    "Android 17 MiuiHome LSPosed protection retained during hot reload"
+                            + ", process=" + processName);
+            return true;
+        }
         PreparedBackTransitionHold heldTransition =
                 preparedBackTransitionHold.get();
         if (heldTransition != null) {
@@ -144,6 +153,35 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
     @Override
     public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
         String reportedProcessName = param.getProcessName();
+        boolean hadMiuiHomeHook = false;
+        for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
+            String oldHookId = oldHandle.getId();
+            if (oldHookId != null && oldHookId.startsWith("miui_home_")) {
+                hadMiuiHomeHook = true;
+                break;
+            }
+        }
+        if (blockMiuiHomeXposedHooks()
+                && (isMiuiHomeProcess(reportedProcessName) || hadMiuiHomeHook)) {
+            processName = reportedProcessName;
+            int unhooked = 0;
+            for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
+                try {
+                    oldHandle.unhook();
+                    unhooked++;
+                } catch (Throwable throwable) {
+                    moduleLog(Log.ERROR, TAG,
+                            "Failed to remove an old MiuiHome hook while enabling Android 17"
+                                    + " protection: " + oldHandle,
+                            throwable);
+                }
+            }
+            moduleLog(Log.WARN, TAG,
+                    "Android 17 MiuiHome LSPosed protection active after hot reload"
+                            + ", process=" + reportedProcessName
+                            + ", oldHooksRemoved=" + unhooked);
+            return;
+        }
         int replaced = 0;
         Set<String> oldHookIds = new java.util.HashSet<>();
         boolean hadServerHook = false;
@@ -973,6 +1011,13 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         String loadedPackage = param.getPackageName();
+        if (MIUI_HOME.equals(loadedPackage) && blockMiuiHomeXposedHooks()) {
+            processName = loadedPackage;
+            moduleLog(Log.WARN, TAG,
+                    "Skipped every MiuiHome LSPosed hook on Android 17"
+                            + ", sourceDir=" + param.getApplicationInfo().sourceDir);
+            return;
+        }
         if (SYSTEM_UI.equals(loadedPackage) || MIUI_HOME.equals(loadedPackage)
                 || processName == null) {
             processName = loadedPackage;
@@ -988,6 +1033,11 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
     }
 
     protected void installMiuiHomeHooks(ClassLoader classLoader) {
+        if (blockMiuiHomeXposedHooks()) {
+            moduleLog(Log.WARN, TAG,
+                    "Rejected MiuiHome hook installation on Android 17");
+            return;
+        }
         try {
             Class<?> gestureStubClass = Class.forName(MIUI_HOME_GESTURE_STUB, false,
                     classLoader);

@@ -18,6 +18,7 @@ app/build/
 logs/
 reports/
 out/
+/miui-home-hyos-zn-*.zip
 
 # Local-only Xiaomi/vendor references and reverse-engineering outputs.
 # Keep these files on the workstation; never publish proprietary binaries or decompilation.

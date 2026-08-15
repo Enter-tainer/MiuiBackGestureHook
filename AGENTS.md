@@ -133,6 +133,14 @@ com.miui.home
 system
 ```
 
+Android 17 launcher safety rule:
+
+- Keep `com.miui.home` in the static LSPosed scope only for Android 16 compatibility. On
+  Android 17 and newer, the module may be loaded because the scope list is static, but it must
+  register no MiuiHome-process LSPosed hooks. Cold package loading and hot-reload backfill must
+  both fail closed; hot reload from an older build must unhook every old MiuiHome handle instead
+  of replacing it. Android 17 launcher-side research belongs to the native ZN module.
+
 Keep scope minimal. Do not add target applications or further `system_server` cleanup or
 compatibility hooks unless new SystemUI/server evidence requires them.
 

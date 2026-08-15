@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.SystemClock;
@@ -93,6 +94,7 @@ public abstract class HookRuntimeCore extends XposedModule {
             BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")";
     protected static final String SYSTEM_UI = "com.android.systemui";
     protected static final String MIUI_HOME = "com.miui.home";
+    protected static final int ANDROID_17_API_LEVEL = 37;
     protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
             WindowOnBackInvokedDispatcher.class.getName();
     protected static final int APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG = 0x8;
@@ -495,6 +497,20 @@ public abstract class HookRuntimeCore extends XposedModule {
                 }
             };
     protected String processName;
+
+    /**
+     * Android 17 MiuiHome is protected from every LSPosed hook in this module. The package
+     * remains in the static scope solely so the same APK can continue supporting Android 16;
+     * libxposed does not provide a platform-conditional scope list.
+     */
+    protected static boolean blockMiuiHomeXposedHooks() {
+        return Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL;
+    }
+
+    protected static boolean isMiuiHomeProcess(String candidate) {
+        return MIUI_HOME.equals(candidate)
+                || (candidate != null && candidate.startsWith(MIUI_HOME + ":"));
+    }
     protected boolean nativePluginDiagnosticsLogged;
     protected boolean headlessSysUiStateLogged;
     protected volatile Field defaultTransitionAnimationsField;
@@ -972,6 +988,15 @@ public abstract class HookRuntimeCore extends XposedModule {
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
         processName = param.getProcessName();
+        if (blockMiuiHomeXposedHooks() && isMiuiHomeProcess(processName)) {
+            // Do not even open remote preferences in Android 17 MiuiHome. LSPosed still loads
+            // the module because scope.list must retain Android 16 support, but this process
+            // remains hook-free.
+            moduleLog(Log.WARN, TAG,
+                    "Android 17 MiuiHome LSPosed protection active; module loaded without hooks"
+                            + ", process=" + processName);
+            return;
+        }
         initializeModuleLoggingPreference();
         moduleLog(Log.INFO, TAG, "Module loaded, build=" + BUILD_MARK
                 + ", process=" + processName
